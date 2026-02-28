@@ -82,12 +82,13 @@ fi
 assert_file_contains "$stderr1" "Please run ap init first"
 
 # Case 2:
-# Creates projects.yaml when missing and appends project.
-echo "[test] creates ~/.autopilot/projects.yaml and adds project"
+# Creates projects.yaml when missing, appends project, and creates project directory.
+echo "[test] creates ~/.autopilot/projects.yaml, adds project, and creates project directory"
 home2="$TMP_DIR/home2"
 mkdir -p "$home2/.autopilot"
 HOME="$home2" "$AP_BIN" new Project-1 >/dev/null
 assert_exists "$home2/.autopilot/projects.yaml"
+assert_exists "$home2/.autopilot/projects/Project-1"
 assert_project_block "$home2/.autopilot/projects.yaml" "Project-1"
 
 # Case 3:
@@ -118,5 +119,6 @@ stdout5="$TMP_DIR/stdout5.txt"
 printf 'Interactive9\n' | HOME="$home2" "$AP_BIN" new >"$stdout5"
 assert_file_contains "$stdout5" "Enter your new project name:"
 assert_project_block "$home2/.autopilot/projects.yaml" "Interactive9"
+assert_exists "$home2/.autopilot/projects/Interactive9"
 
 echo "all tests passed"

@@ -9,6 +9,14 @@ fs::path autopilot_dir_path() {
   return fs::path(get_home_dir()) / ".autopilot";
 }
 
+fs::path projects_dir_path() {
+  return autopilot_dir_path() / "projects";
+}
+
+fs::path project_dir_path(const std::string& project_name) {
+  return projects_dir_path() / project_name;
+}
+
 fs::path projects_file_path() {
   return autopilot_dir_path() / "projects.yaml";
 }

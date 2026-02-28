@@ -15,7 +15,7 @@ void print_usage(const char* prog) {
   std::cerr << "       " << prog << " new [project_name]\n";
   std::cerr << "       " << prog << " delete [project_name]\n";
   std::cerr << "       " << prog << " list\n";
-  std::cerr << "       " << prog << " add <path> [-p <project_name>]\n";
+  std::cerr << "       " << prog << " add <path> [-n <name>] [-p <project_name>]\n";
   std::cerr << "       " << prog << " rm [-p <project_name>]\n";
   std::cerr << "       " << prog << " briefing\n";
 }
@@ -66,14 +66,32 @@ int main(int argc, char** argv) {
   }
 
   if (cmd == "add") {
-    if (argc == 3) {
-      return cmd_add(std::string(argv[2]), std::nullopt);
+    if (argc < 3) {
+      print_usage(argv[0]);
+      return 1;
     }
-    if (argc == 5 && std::string(argv[3]) == "-p") {
-      return cmd_add(std::string(argv[2]), std::string(argv[4]));
+
+    const std::string path_arg = argv[2];
+    std::optional<std::string> maybe_project_name;
+    std::optional<std::string> maybe_path_name;
+    for (int i = 3; i < argc; i += 2) {
+      if (i + 1 >= argc) {
+        print_usage(argv[0]);
+        return 1;
+      }
+      const std::string flag = argv[i];
+      const std::string value = argv[i + 1];
+      if (flag == "-p") {
+        maybe_project_name = value;
+      } else if (flag == "-n") {
+        maybe_path_name = value;
+      } else {
+        print_usage(argv[0]);
+        return 1;
+      }
     }
-    print_usage(argv[0]);
-    return 1;
+
+    return cmd_add(path_arg, maybe_path_name, maybe_project_name);
   }
 
   if (cmd == "rm") {

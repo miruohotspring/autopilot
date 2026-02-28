@@ -44,7 +44,7 @@ assert_project_has_path() {
   if ! awk -v project="$project" -v path_value="$path_value" '
     $0 == project ":" { in_target = 1; next }
     in_target && $0 ~ /^[^ \t#][^:]*:/ { in_target = 0 }
-    in_target && $0 == "    - \047" path_value "\047" { found = 1 }
+    in_target && $0 == "      path: \047" path_value "\047" { found = 1 }
     END { exit(found ? 0 : 1) }
   ' "$file"; then
     echo "assert failed: expected path '$path_value' in project '$project'" >&2
@@ -62,7 +62,7 @@ assert_project_not_has_path() {
   if awk -v project="$project" -v path_value="$path_value" '
     $0 == project ":" { in_target = 1; next }
     in_target && $0 ~ /^[^ \t#][^:]*:/ { in_target = 0 }
-    in_target && $0 == "    - \047" path_value "\047" { found = 1 }
+    in_target && $0 == "      path: \047" path_value "\047" { found = 1 }
     END { exit(found ? 0 : 1) }
   ' "$file"; then
     echo "assert failed: expected path '$path_value' to be removed from project '$project'" >&2
@@ -123,9 +123,9 @@ path_a1="$TMP_DIR/p-a1"
 path_a2="$TMP_DIR/p-a2"
 path_b1="$TMP_DIR/p-b1"
 mkdir -p "$path_a1" "$path_a2" "$path_b1"
-HOME="$home2" "$AP_BIN" add "$path_a1" -p AlphaProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$path_a2" -p AlphaProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$path_b1" -p BetaProject >/dev/null
+HOME="$home2" "$AP_BIN" add "$path_a1" -n a1 -p AlphaProject >/dev/null
+HOME="$home2" "$AP_BIN" add "$path_a2" -n a2 -p AlphaProject >/dev/null
+HOME="$home2" "$AP_BIN" add "$path_b1" -n b1 -p BetaProject >/dev/null
 projects_file="$home2/.autopilot/projects.yaml"
 
 # Case 3:

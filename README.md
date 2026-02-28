@@ -36,6 +36,7 @@ ap init
 ```
 
 It will create `$HOME/.autopilot` directory.
+It also creates `$HOME/.autopilot/projects`.
 
 ## New project
 
@@ -57,6 +58,12 @@ Enter your new project name:
 <project_name>:
   priority: 1
   paths: []
+```
+
+It also creates project directory:
+
+```text
+$HOME/.autopilot/projects/<project_name>
 ```
 
 ## Delete project
@@ -106,7 +113,7 @@ no projects
 ## Add path
 
 ```bash
-ap add <path> -p <project_name>
+ap add <path> [-n <name>] [-p <project_name>]
 ```
 
 If `-p <project_name>` is omitted, `ap` asks you to select a project:
@@ -117,7 +124,29 @@ Select project to add path:
 
 The given `<path>` is normalized and stored as an absolute path.
 
-If the same path already exists in the target project, `ap add` does nothing (not an error).
+`-n <name>` is optional. If omitted, `ap` asks:
+
+```text
+Enter path name [main]:
+```
+
+When you press Enter without input, `main` is used as the default.
+If `main` already exists in that project, empty input is rejected and explicit input is required.
+
+`ap add` stores both `name` and `path` in `projects.yaml`.
+
+`name` and `path` are one-to-one in each project:
+
+- same `path` with different `name` is rejected
+- same `name` with different `path` is rejected
+
+If the same `name/path` pair already exists in the target project, `ap add` does nothing (not an error).
+
+`ap add` also creates a symlink:
+
+```text
+$HOME/.autopilot/projects/<project_name>/<name> -> <path>
+```
 
 ## Remove path
 

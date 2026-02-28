@@ -7,6 +7,7 @@
 #include <regex>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -16,6 +17,7 @@ namespace {
 const std::regex kTopLevelKeyRe(R"(^([A-Za-z0-9-]+)\s*:)");
 const std::regex kPathsLineRe(R"(^([ \t]+)paths\s*:\s*(.*)$)");
 const std::regex kListItemRe(R"(^([ \t]*)-\s*(.*)$)");
+const std::regex kKeyValueRe(R"(^([A-Za-z0-9_-]+)\s*:\s*(.*)$)");
 
 struct ProjectRange {
   std::size_t begin;
@@ -26,6 +28,13 @@ struct PathsEntry {
   std::size_t line_index;
   std::string indent;
   std::string tail;
+};
+
+struct ParsedPathItem {
+  std::size_t begin_line;
+  std::size_t end_line;
+  std::optional<std::string> name;
+  std::optional<std::string> path;
 };
 
 std::string trim_ascii_whitespace(const std::string& s) {
@@ -97,6 +106,15 @@ std::string parse_yaml_scalar(std::string s) {
   }
 
   return s;
+}
+
+std::optional<std::pair<std::string, std::string>> parse_yaml_key_value(std::string s) {
+  s = trim_ascii_whitespace(s);
+  std::smatch match;
+  if (!std::regex_match(s, match, kKeyValueRe)) {
+    return std::nullopt;
+  }
+  return std::make_pair(match[1].str(), trim_ascii_whitespace(match[2].str()));
 }
 
 std::vector<std::string> read_all_lines(const fs::path& file) {
@@ -179,7 +197,7 @@ std::size_t find_yaml_child_section_end(
   return project_end;
 }
 
-std::vector<std::pair<std::size_t, std::string>> collect_paths_items(
+std::vector<ParsedPathItem> collect_paths_items(
     const std::vector<std::string>& lines,
     const std::size_t paths_line_index,
     const std::size_t parent_indent_width,
@@ -187,19 +205,79 @@ std::vector<std::pair<std::size_t, std::string>> collect_paths_items(
   const std::size_t section_end =
       find_yaml_child_section_end(lines, paths_line_index, parent_indent_width, project_end);
 
-  std::vector<std::pair<std::size_t, std::string>> items;
-  for (std::size_t i = paths_line_index + 1; i < section_end; ++i) {
+  std::vector<ParsedPathItem> items;
+  for (std::size_t i = paths_line_index + 1; i < section_end;) {
     std::smatch item_match;
     if (!std::regex_match(lines[i], item_match, kListItemRe)) {
+      ++i;
       continue;
     }
 
     const std::string item_indent = item_match[1].str();
     if (item_indent.size() <= parent_indent_width) {
+      ++i;
       continue;
     }
 
-    items.push_back({i, parse_yaml_scalar(item_match[2].str())});
+    ParsedPathItem item;
+    item.begin_line = i;
+    item.end_line = i + 1;
+
+    const std::string list_item_tail = trim_ascii_whitespace(item_match[2].str());
+    const std::optional<std::pair<std::string, std::string>> inline_key_value =
+        parse_yaml_key_value(list_item_tail);
+    if (!inline_key_value.has_value()) {
+      item.path = parse_yaml_scalar(list_item_tail);
+      items.push_back(item);
+      ++i;
+      continue;
+    }
+
+    if (inline_key_value->first == "name") {
+      item.name = parse_yaml_scalar(inline_key_value->second);
+    } else if (inline_key_value->first == "path") {
+      item.path = parse_yaml_scalar(inline_key_value->second);
+    } else {
+      throw std::runtime_error("unsupported paths item key: " + inline_key_value->first);
+    }
+
+    std::size_t j = i + 1;
+    for (; j < section_end; ++j) {
+      std::smatch next_item_match;
+      if (std::regex_match(lines[j], next_item_match, kListItemRe) &&
+          next_item_match[1].str().size() == item_indent.size()) {
+        break;
+      }
+
+      const std::size_t first_non_ws = lines[j].find_first_not_of(" \t");
+      if (first_non_ws == std::string::npos) {
+        continue;
+      }
+      if (first_non_ws <= item_indent.size()) {
+        break;
+      }
+
+      const std::optional<std::pair<std::string, std::string>> nested_key_value =
+          parse_yaml_key_value(lines[j]);
+      if (!nested_key_value.has_value()) {
+        continue;
+      }
+      if (nested_key_value->first == "name") {
+        item.name = parse_yaml_scalar(nested_key_value->second);
+      } else if (nested_key_value->first == "path") {
+        item.path = parse_yaml_scalar(nested_key_value->second);
+      } else {
+        throw std::runtime_error("unsupported paths item key: " + nested_key_value->first);
+      }
+    }
+
+    if (!item.path.has_value()) {
+      throw std::runtime_error("unsupported paths item format: missing path");
+    }
+
+    item.end_line = j;
+    items.push_back(item);
+    i = j;
   }
   return items;
 }
@@ -273,9 +351,43 @@ std::vector<std::string> load_project_paths(
   std::vector<std::string> paths;
   paths.reserve(items.size());
   for (const auto& item : items) {
-    paths.push_back(item.second);
+    if (!item.path.has_value()) {
+      throw std::runtime_error("unsupported paths item format: missing path");
+    }
+    paths.push_back(*item.path);
   }
   return paths;
+}
+
+bool project_has_path_name(
+    const fs::path& projects_file,
+    const std::string& project_name,
+    const std::string& path_name) {
+  const std::vector<std::string> lines = read_all_lines(projects_file);
+  const std::optional<ProjectRange> range = find_project_range(lines, project_name);
+  if (!range.has_value()) {
+    return false;
+  }
+
+  const std::optional<PathsEntry> paths_entry = find_paths_entry(lines, *range);
+  if (!paths_entry.has_value() || paths_entry->tail == "[]") {
+    return false;
+  }
+  if (!paths_entry->tail.empty()) {
+    throw std::runtime_error("unsupported paths format in project: " + project_name);
+  }
+
+  const auto items = collect_paths_items(
+      lines,
+      paths_entry->line_index,
+      paths_entry->indent.size(),
+      range->end);
+  for (const auto& item : items) {
+    if (item.name.has_value() && *item.name == path_name) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool file_ends_with_newline(const fs::path& file) {
@@ -335,7 +447,8 @@ bool remove_project_block(const fs::path& projects_file, const std::string& proj
 AddProjectPathResult add_project_path(
     const fs::path& projects_file,
     const std::string& project_name,
-    const std::string& path_value) {
+    const std::string& path_value,
+    const std::string& path_name) {
   std::vector<std::string> lines = read_all_lines(projects_file);
   const std::optional<ProjectRange> range = find_project_range(lines, project_name);
   if (!range.has_value()) {
@@ -355,7 +468,9 @@ AddProjectPathResult add_project_path(
 
     lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(range->end), paths_indent + "paths:");
     lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(range->end + 1),
-                 paths_indent + "  - " + yaml_single_quote(path_value));
+                 paths_indent + "  - name: " + yaml_single_quote(path_name));
+    lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(range->end + 2),
+                 paths_indent + "    path: " + yaml_single_quote(path_value));
     write_all_lines(projects_file, lines);
     return AddProjectPathResult::Added;
   }
@@ -363,7 +478,9 @@ AddProjectPathResult add_project_path(
   if (paths_entry->tail == "[]") {
     lines[paths_entry->line_index] = paths_entry->indent + "paths:";
     lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(paths_entry->line_index + 1),
-                 paths_entry->indent + "  - " + yaml_single_quote(path_value));
+                 paths_entry->indent + "  - name: " + yaml_single_quote(path_name));
+    lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(paths_entry->line_index + 2),
+                 paths_entry->indent + "    path: " + yaml_single_quote(path_value));
     write_all_lines(projects_file, lines);
     return AddProjectPathResult::Added;
   }
@@ -378,8 +495,17 @@ AddProjectPathResult add_project_path(
       paths_entry->indent.size(),
       range->end);
   for (const auto& item : items) {
-    if (item.second == path_value) {
-      return AddProjectPathResult::AlreadyExists;
+    if (!item.path.has_value()) {
+      throw std::runtime_error("unsupported paths item format: missing path");
+    }
+    if (*item.path == path_value) {
+      if (item.name.has_value() && *item.name == path_name) {
+        return AddProjectPathResult::AlreadyExists;
+      }
+      return AddProjectPathResult::PathAlreadyExistsWithDifferentName;
+    }
+    if (item.name.has_value() && *item.name == path_name) {
+      return AddProjectPathResult::NameAlreadyExistsWithDifferentPath;
     }
   }
 
@@ -390,7 +516,9 @@ AddProjectPathResult add_project_path(
       range->end);
 
   lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(insert_index),
-               paths_entry->indent + "  - " + yaml_single_quote(path_value));
+               paths_entry->indent + "  - name: " + yaml_single_quote(path_name));
+  lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(insert_index + 1),
+               paths_entry->indent + "    path: " + yaml_single_quote(path_value));
   write_all_lines(projects_file, lines);
   return AddProjectPathResult::Added;
 }
@@ -423,20 +551,28 @@ RemoveProjectPathResult remove_project_path(
       paths_entry->indent.size(),
       range->end);
 
-  std::size_t remove_line_index = lines.size();
+  std::size_t remove_begin_index = lines.size();
+  std::size_t remove_end_index = lines.size();
   for (const auto& item : items) {
-    if (item.second == path_value) {
-      remove_line_index = item.first;
+    if (!item.path.has_value()) {
+      throw std::runtime_error("unsupported paths item format: missing path");
+    }
+    if (*item.path == path_value) {
+      remove_begin_index = item.begin_line;
+      remove_end_index = item.end_line;
       break;
     }
   }
-  if (remove_line_index == lines.size()) {
+  if (remove_begin_index == lines.size()) {
     return RemoveProjectPathResult::PathNotFound;
   }
 
-  lines.erase(lines.begin() + static_cast<std::ptrdiff_t>(remove_line_index));
+  const std::size_t removed_line_count = remove_end_index - remove_begin_index;
+  lines.erase(
+      lines.begin() + static_cast<std::ptrdiff_t>(remove_begin_index),
+      lines.begin() + static_cast<std::ptrdiff_t>(remove_end_index));
 
-  const std::size_t adjusted_project_end = range->end - 1;
+  const std::size_t adjusted_project_end = range->end - removed_line_count;
   const auto remaining_items = collect_paths_items(
       lines,
       paths_entry->line_index,

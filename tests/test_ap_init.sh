@@ -53,6 +53,7 @@ home1="$TMP_DIR/home1"
 mkdir -p "$home1"
 HOME="$home1" "$AP_BIN" init >/dev/null
 assert_exists "$home1/.autopilot"
+assert_exists "$home1/.autopilot/projects"
 assert_not_exists "$home1/.autopilot.bak"
 
 # Case 2:
@@ -64,6 +65,7 @@ mkdir -p "$home2/.autopilot"
 echo "old-state" > "$home2/.autopilot/state.txt"
 HOME="$home2" "$AP_BIN" init >/dev/null
 assert_exists "$home2/.autopilot"
+assert_exists "$home2/.autopilot/projects"
 assert_exists "$home2/.autopilot.bak"
 assert_exists "$home2/.autopilot.bak/state.txt"
 assert_file_content "$home2/.autopilot.bak/state.txt" "old-state"

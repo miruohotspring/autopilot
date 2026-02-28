@@ -49,6 +49,8 @@ int cmd_new(const std::optional<std::string>& maybe_project_name) {
       return 1;
     }
 
+    fs::create_directories(project_dir_path(project_name));
+
     const bool needs_leading_newline = !file_ends_with_newline(projects_file);
     std::ofstream out(projects_file, std::ios::app);
     if (!out) {

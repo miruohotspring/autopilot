@@ -10,6 +10,7 @@ namespace fs = std::filesystem;
 int cmd_init() {
   const fs::path home = get_home_dir();
   const fs::path autopilot_dir = home / ".autopilot";
+  const fs::path projects_dir = autopilot_dir / "projects";
   const fs::path backup_dir = home / ".autopilot.bak";
 
   try {
@@ -22,8 +23,9 @@ int cmd_init() {
       std::cout << "renamed: " << autopilot_dir << " -> " << backup_dir << '\n';
     }
 
-    fs::create_directories(autopilot_dir);
+    fs::create_directories(projects_dir);
     std::cout << "created: " << autopilot_dir << '\n';
+    std::cout << "created: " << projects_dir << '\n';
     return 0;
   } catch (const std::exception& e) {
     std::cerr << "ap init failed: " << e.what() << '\n';
