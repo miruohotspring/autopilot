@@ -102,3 +102,19 @@ Outputs project names one per line. If no project exists, it prints:
 ```text
 no projects
 ```
+
+## Add path
+
+```bash
+ap add <path> -p <project_name>
+```
+
+If `-p <project_name>` is omitted, `ap` asks you to select a project:
+
+```text
+Select project to add path:
+```
+
+The given `<path>` is normalized and stored as an absolute path.
+
+If the same path already exists in the target project, `ap add` does nothing (not an error).

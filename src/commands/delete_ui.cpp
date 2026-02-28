@@ -38,18 +38,21 @@ bool is_interactive_terminal() {
   return ::isatty(STDIN_FILENO) && ::isatty(STDOUT_FILENO);
 }
 
-std::optional<std::string> select_project_to_delete_with_prompt(const std::vector<std::string>& project_list) {
+std::optional<std::string> select_project_with_prompt(
+    const std::vector<std::string>& project_list,
+    const std::string& heading,
+    const std::string& number_prompt) {
   if (project_list.empty()) {
     return std::nullopt;
   }
 
-  std::cout << "Select project to delete:\n";
+  std::cout << heading << '\n';
   for (std::size_t i = 0; i < project_list.size(); ++i) {
     std::cout << "  " << (i + 1) << ") " << project_list[i] << '\n';
   }
 
   while (true) {
-    std::cout << "Enter number to delete: ";
+    std::cout << number_prompt;
     std::cout.flush();
 
     std::string answer;
@@ -71,12 +74,13 @@ std::optional<std::string> select_project_to_delete_with_prompt(const std::vecto
   }
 }
 
-std::optional<std::string> select_project_to_delete_with_tui(std::vector<std::string> project_list) {
+std::optional<std::string> select_project_with_tui(
+    std::vector<std::string> project_list,
+    const std::string& prompt) {
   if (project_list.empty()) {
     return std::nullopt;
   }
 
-  const std::string prompt = "? Select project to delete (Use arrow keys or j/k)";
   std::size_t max_width = prompt.size();
   for (const std::string& project_name : project_list) {
     max_width = std::max(max_width, project_name.size() + 3U);
@@ -127,14 +131,34 @@ std::optional<std::string> select_project_to_delete_with_tui(std::vector<std::st
   return project_list[static_cast<std::size_t>(selected)];
 }
 
+std::optional<std::string> select_project_with_ui(
+    const std::set<std::string>& projects,
+    const std::string& heading,
+    const std::string& tui_prompt,
+    const std::string& number_prompt) {
+  const std::vector<std::string> project_list(projects.begin(), projects.end());
+  if (is_interactive_terminal()) {
+    return select_project_with_tui(project_list, tui_prompt);
+  }
+  return select_project_with_prompt(project_list, heading, number_prompt);
+}
+
 }  // namespace
 
 std::optional<std::string> select_project_to_delete(const std::set<std::string>& projects) {
-  const std::vector<std::string> project_list(projects.begin(), projects.end());
-  if (is_interactive_terminal()) {
-    return select_project_to_delete_with_tui(project_list);
-  }
-  return select_project_to_delete_with_prompt(project_list);
+  return select_project_with_ui(
+      projects,
+      "Select project to delete:",
+      "? Select project to delete (Use arrow keys or j/k)",
+      "Enter number to delete: ");
+}
+
+std::optional<std::string> select_project_to_add_path(const std::set<std::string>& projects) {
+  return select_project_with_ui(
+      projects,
+      "Select project to add path:",
+      "? Select project to add path (Use arrow keys or j/k)",
+      "Enter number to add path: ");
 }
 
 std::optional<bool> confirm_delete(const std::string& project_name) {
