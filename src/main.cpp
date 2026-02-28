@@ -3,6 +3,7 @@
 #include "autopilot/commands/cmd_delete.hpp"
 #include "autopilot/commands/cmd_list.hpp"
 #include "autopilot/commands/cmd_new.hpp"
+#include "autopilot/commands/cmd_rm.hpp"
 
 #include <iostream>
 #include <optional>
@@ -14,6 +15,7 @@ void print_usage(const char* prog) {
   std::cerr << "       " << prog << " delete [project_name]\n";
   std::cerr << "       " << prog << " list\n";
   std::cerr << "       " << prog << " add <path> [-p <project_name>]\n";
+  std::cerr << "       " << prog << " rm [-p <project_name>]\n";
 }
 
 int main(int argc, char** argv) {
@@ -67,6 +69,17 @@ int main(int argc, char** argv) {
     }
     if (argc == 5 && std::string(argv[3]) == "-p") {
       return cmd_add(std::string(argv[2]), std::string(argv[4]));
+    }
+    print_usage(argv[0]);
+    return 1;
+  }
+
+  if (cmd == "rm") {
+    if (argc == 2) {
+      return cmd_rm(std::nullopt);
+    }
+    if (argc == 4 && std::string(argv[2]) == "-p") {
+      return cmd_rm(std::string(argv[3]));
     }
     print_usage(argv[0]);
     return 1;

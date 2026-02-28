@@ -118,3 +118,13 @@ Select project to add path:
 The given `<path>` is normalized and stored as an absolute path.
 
 If the same path already exists in the target project, `ap add` does nothing (not an error).
+
+## Remove path
+
+```bash
+ap rm -p <project_name>
+```
+
+If `-p <project_name>` is omitted, `ap` asks you to select a project.
+
+`ap rm` then shows the path list in that project, asks which path to remove, and confirms with `y/n`.
