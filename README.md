@@ -128,3 +128,17 @@ ap rm -p <project_name>
 If `-p <project_name>` is omitted, `ap` asks you to select a project.
 
 `ap rm` then shows the path list in that project, asks which path to remove, and confirms with `y/n`.
+
+## Briefing tmux session
+
+```bash
+ap briefing
+```
+
+`ap briefing` creates tmux session `autopilot`, starts `claude --model sonnet --dangerously-skip-permissions`
+in `autopilot:copilot`, and then:
+
+- inside tmux: switches to `autopilot:copilot`
+- outside tmux: attaches to `autopilot:copilot`
+If session `autopilot` already exists, `ap briefing` reuses it. It checks whether window `copilot`
+exists and creates it only when missing.

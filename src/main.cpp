@@ -4,6 +4,7 @@
 #include "autopilot/commands/cmd_list.hpp"
 #include "autopilot/commands/cmd_new.hpp"
 #include "autopilot/commands/cmd_rm.hpp"
+#include "autopilot/commands/cmd_briefing.hpp"
 
 #include <iostream>
 #include <optional>
@@ -16,6 +17,7 @@ void print_usage(const char* prog) {
   std::cerr << "       " << prog << " list\n";
   std::cerr << "       " << prog << " add <path> [-p <project_name>]\n";
   std::cerr << "       " << prog << " rm [-p <project_name>]\n";
+  std::cerr << "       " << prog << " briefing\n";
 }
 
 int main(int argc, char** argv) {
@@ -83,6 +85,14 @@ int main(int argc, char** argv) {
     }
     print_usage(argv[0]);
     return 1;
+  }
+
+  if (cmd == "briefing") {
+    if (argc != 2) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    return cmd_briefing();
   }
 
   print_usage(argv[0]);
