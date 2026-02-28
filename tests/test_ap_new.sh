@@ -33,6 +33,27 @@ assert_file_contains() {
   fi
 }
 
+assert_project_block() {
+  local path="$1"
+  local project="$2"
+  if ! awk -v project="$project" '
+    $0 == project ":" {
+      if (getline line1 <= 0) next
+      if (getline line2 <= 0) next
+      if (line1 == "  priority: 1" && line2 == "  paths: []") {
+        found = 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$path"; then
+    echo "assert failed: expected project block for $project in $path" >&2
+    echo "--- file content ---" >&2
+    cat "$path" >&2
+    echo "--------------------" >&2
+    exit 1
+  fi
+}
+
 run_expect_fail() {
   set +e
   "$@"
@@ -67,7 +88,7 @@ home2="$TMP_DIR/home2"
 mkdir -p "$home2/.autopilot"
 HOME="$home2" "$AP_BIN" new Project-1 >/dev/null
 assert_exists "$home2/.autopilot/projects.yaml"
-assert_file_contains "$home2/.autopilot/projects.yaml" "Project-1: {}"
+assert_project_block "$home2/.autopilot/projects.yaml" "Project-1"
 
 # Case 3:
 # Duplicate project should fail.
@@ -96,6 +117,6 @@ echo "[test] supports interactive project name input"
 stdout5="$TMP_DIR/stdout5.txt"
 printf 'Interactive9\n' | HOME="$home2" "$AP_BIN" new >"$stdout5"
 assert_file_contains "$stdout5" "Enter your new project name:"
-assert_file_contains "$home2/.autopilot/projects.yaml" "Interactive9: {}"
+assert_project_block "$home2/.autopilot/projects.yaml" "Interactive9"
 
 echo "all tests passed"

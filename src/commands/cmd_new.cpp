@@ -119,7 +119,9 @@ int cmd_new(const std::optional<std::string>& maybe_project_name) {
     if (needs_leading_newline) {
       out << '\n';
     }
-    out << project_name << ": {}\n";
+    out << project_name << ":\n";
+    out << "  priority: 1\n";
+    out << "  paths: []\n";
     std::cout << "created project: " << project_name << '\n';
     return 0;
   } catch (const std::exception& e) {
