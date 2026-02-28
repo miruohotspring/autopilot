@@ -1,9 +1,10 @@
 CXX ?= c++
+CPPFLAGS ?= -Iinclude
 CXXFLAGS ?= -O2 -Wall -Wextra -std=c++17
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 TARGET ?= ap
-SRC ?= main.cpp
+SRC ?= src/main.cpp src/platform/home_dir.cpp src/commands/cmd_init.cpp src/commands/cmd_new.cpp
 
 .PHONY: all clean install uninstall
 .PHONY: test
@@ -11,7 +12,7 @@ SRC ?= main.cpp
 all: $(TARGET)
 
 $(TARGET): $(SRC)
-	$(CXX) $(CXXFLAGS) -o $@ $<
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o $@ $^
 
 install: $(TARGET)
 	install -d $(DESTDIR)$(BINDIR)
@@ -21,7 +22,7 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(TARGET)
 
 test: $(TARGET)
-	./tests/test_ap_init.sh
+	bash ./tests/run_all_tests.sh
 
 clean:
 	rm -f $(TARGET)
