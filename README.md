@@ -165,9 +165,9 @@ ap briefing
 ```
 
 `ap briefing` creates tmux session `autopilot`, starts `claude --model sonnet --dangerously-skip-permissions`
-in `autopilot:copilot`, and then:
+in `autopilot:colonel`, and then:
 
-- inside tmux: switches to `autopilot:copilot`
-- outside tmux: attaches to `autopilot:copilot`
-If session `autopilot` already exists, `ap briefing` reuses it. It checks whether window `copilot`
+- inside tmux: switches to `autopilot:colonel`
+- outside tmux: attaches to `autopilot:colonel`
+If session `autopilot` already exists, `ap briefing` reuses it. It checks whether window `colonel`
 exists and creates it only when missing.
