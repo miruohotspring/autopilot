@@ -1,4 +1,5 @@
 #include "autopilot/commands/cmd_init.hpp"
+#include "autopilot/commands/cmd_delete.hpp"
 #include "autopilot/commands/cmd_new.hpp"
 
 #include <iostream>
@@ -8,6 +9,7 @@
 void print_usage(const char* prog) {
   std::cerr << "Usage: " << prog << " init\n";
   std::cerr << "       " << prog << " new [project_name]\n";
+  std::cerr << "       " << prog << " delete [project_name]\n";
 }
 
 int main(int argc, char** argv) {
@@ -30,6 +32,13 @@ int main(int argc, char** argv) {
       return cmd_new(std::nullopt);
     }
     return cmd_new(std::string(argv[2]));
+  }
+
+  if (cmd == "delete") {
+    if (argc == 2) {
+      return cmd_delete(std::nullopt);
+    }
+    return cmd_delete(std::string(argv[2]));
   }
 
   print_usage(argv[0]);
