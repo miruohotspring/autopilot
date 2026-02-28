@@ -6,6 +6,11 @@
 make
 ```
 
+## Licenses
+
+- Project license: [LICENSE](LICENSE)
+- Third-party notices: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+
 ## Test
 
 ```bash
