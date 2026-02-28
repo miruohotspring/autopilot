@@ -13,7 +13,8 @@ LDLIBS += -pthread
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 TARGET ?= ap
-SRC ?= src/main.cpp src/platform/home_dir.cpp src/commands/cmd_init.cpp src/commands/cmd_new.cpp src/commands/cmd_delete.cpp
+SRC_DIR ?= src
+SRC ?= $(sort $(shell find $(SRC_DIR) -type f -name '*.cpp'))
 FTXUI_CONFIG_STAMP := $(FTXUI_BUILD_DIR)/.configured
 FTXUI_LIBS := $(FTXUI_BUILD_DIR)/libftxui-component.a $(FTXUI_BUILD_DIR)/libftxui-dom.a $(FTXUI_BUILD_DIR)/libftxui-screen.a
 
