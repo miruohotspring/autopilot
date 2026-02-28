@@ -90,3 +90,15 @@ Before deletion, `ap` asks for confirmation:
 ```text
 Delete project '<project_name>'? [y/n]:
 ```
+
+## List projects
+
+```bash
+ap list
+```
+
+Outputs project names one per line. If no project exists, it prints:
+
+```text
+no projects
+```
