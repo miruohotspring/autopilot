@@ -142,9 +142,8 @@ void write_all_lines(const fs::path& file, const std::vector<std::string>& lines
   }
 }
 
-std::optional<ProjectRange> find_project_range(
-    const std::vector<std::string>& lines,
-    const std::string& project_name) {
+std::optional<ProjectRange>
+find_project_range(const std::vector<std::string>& lines, const std::string& project_name) {
   std::size_t begin = lines.size();
   for (std::size_t i = 0; i < lines.size(); ++i) {
     std::smatch match;
@@ -168,9 +167,8 @@ std::optional<ProjectRange> find_project_range(
   return ProjectRange{begin, end};
 }
 
-std::optional<PathsEntry> find_paths_entry(
-    const std::vector<std::string>& lines,
-    const ProjectRange& range) {
+std::optional<PathsEntry>
+find_paths_entry(const std::vector<std::string>& lines, const ProjectRange& range) {
   for (std::size_t i = range.begin + 1; i < range.end; ++i) {
     std::smatch match;
     if (std::regex_match(lines[i], match, kPathsLineRe)) {
@@ -282,7 +280,7 @@ std::vector<ParsedPathItem> collect_paths_items(
   return items;
 }
 
-}  // namespace
+} // namespace
 
 bool is_valid_project_name(const std::string& name) {
   if (name.empty()) {
@@ -321,9 +319,8 @@ std::set<std::string> load_top_level_projects(const fs::path& projects_file) {
   return projects;
 }
 
-std::vector<std::string> load_project_paths(
-    const fs::path& projects_file,
-    const std::string& project_name) {
+std::vector<std::string>
+load_project_paths(const fs::path& projects_file, const std::string& project_name) {
   const std::vector<std::string> lines = read_all_lines(projects_file);
   const std::optional<ProjectRange> range = find_project_range(lines, project_name);
   if (!range.has_value()) {
@@ -342,11 +339,8 @@ std::vector<std::string> load_project_paths(
     throw std::runtime_error("unsupported paths format in project: " + project_name);
   }
 
-  const auto items = collect_paths_items(
-      lines,
-      paths_entry->line_index,
-      paths_entry->indent.size(),
-      range->end);
+  const auto items =
+      collect_paths_items(lines, paths_entry->line_index, paths_entry->indent.size(), range->end);
 
   std::vector<std::string> paths;
   paths.reserve(items.size());
@@ -360,9 +354,7 @@ std::vector<std::string> load_project_paths(
 }
 
 bool project_has_path_name(
-    const fs::path& projects_file,
-    const std::string& project_name,
-    const std::string& path_name) {
+    const fs::path& projects_file, const std::string& project_name, const std::string& path_name) {
   const std::vector<std::string> lines = read_all_lines(projects_file);
   const std::optional<ProjectRange> range = find_project_range(lines, project_name);
   if (!range.has_value()) {
@@ -377,11 +369,8 @@ bool project_has_path_name(
     throw std::runtime_error("unsupported paths format in project: " + project_name);
   }
 
-  const auto items = collect_paths_items(
-      lines,
-      paths_entry->line_index,
-      paths_entry->indent.size(),
-      range->end);
+  const auto items =
+      collect_paths_items(lines, paths_entry->line_index, paths_entry->indent.size(), range->end);
   for (const auto& item : items) {
     if (item.name.has_value() && *item.name == path_name) {
       return true;
@@ -467,20 +456,24 @@ AddProjectPathResult add_project_path(
     }
 
     lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(range->end), paths_indent + "paths:");
-    lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(range->end + 1),
-                 paths_indent + "  - name: " + yaml_single_quote(path_name));
-    lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(range->end + 2),
-                 paths_indent + "    path: " + yaml_single_quote(path_value));
+    lines.insert(
+        lines.begin() + static_cast<std::ptrdiff_t>(range->end + 1),
+        paths_indent + "  - name: " + yaml_single_quote(path_name));
+    lines.insert(
+        lines.begin() + static_cast<std::ptrdiff_t>(range->end + 2),
+        paths_indent + "    path: " + yaml_single_quote(path_value));
     write_all_lines(projects_file, lines);
     return AddProjectPathResult::Added;
   }
 
   if (paths_entry->tail == "[]") {
     lines[paths_entry->line_index] = paths_entry->indent + "paths:";
-    lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(paths_entry->line_index + 1),
-                 paths_entry->indent + "  - name: " + yaml_single_quote(path_name));
-    lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(paths_entry->line_index + 2),
-                 paths_entry->indent + "    path: " + yaml_single_quote(path_value));
+    lines.insert(
+        lines.begin() + static_cast<std::ptrdiff_t>(paths_entry->line_index + 1),
+        paths_entry->indent + "  - name: " + yaml_single_quote(path_name));
+    lines.insert(
+        lines.begin() + static_cast<std::ptrdiff_t>(paths_entry->line_index + 2),
+        paths_entry->indent + "    path: " + yaml_single_quote(path_value));
     write_all_lines(projects_file, lines);
     return AddProjectPathResult::Added;
   }
@@ -489,11 +482,8 @@ AddProjectPathResult add_project_path(
     throw std::runtime_error("unsupported paths format in project: " + project_name);
   }
 
-  const auto items = collect_paths_items(
-      lines,
-      paths_entry->line_index,
-      paths_entry->indent.size(),
-      range->end);
+  const auto items =
+      collect_paths_items(lines, paths_entry->line_index, paths_entry->indent.size(), range->end);
   for (const auto& item : items) {
     if (!item.path.has_value()) {
       throw std::runtime_error("unsupported paths item format: missing path");
@@ -510,23 +500,20 @@ AddProjectPathResult add_project_path(
   }
 
   const std::size_t insert_index = find_yaml_child_section_end(
-      lines,
-      paths_entry->line_index,
-      paths_entry->indent.size(),
-      range->end);
+      lines, paths_entry->line_index, paths_entry->indent.size(), range->end);
 
-  lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(insert_index),
-               paths_entry->indent + "  - name: " + yaml_single_quote(path_name));
-  lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(insert_index + 1),
-               paths_entry->indent + "    path: " + yaml_single_quote(path_value));
+  lines.insert(
+      lines.begin() + static_cast<std::ptrdiff_t>(insert_index),
+      paths_entry->indent + "  - name: " + yaml_single_quote(path_name));
+  lines.insert(
+      lines.begin() + static_cast<std::ptrdiff_t>(insert_index + 1),
+      paths_entry->indent + "    path: " + yaml_single_quote(path_value));
   write_all_lines(projects_file, lines);
   return AddProjectPathResult::Added;
 }
 
 RemoveProjectPathResult remove_project_path(
-    const fs::path& projects_file,
-    const std::string& project_name,
-    const std::string& path_value) {
+    const fs::path& projects_file, const std::string& project_name, const std::string& path_value) {
   std::vector<std::string> lines = read_all_lines(projects_file);
   const std::optional<ProjectRange> range = find_project_range(lines, project_name);
   if (!range.has_value()) {
@@ -545,11 +532,8 @@ RemoveProjectPathResult remove_project_path(
     throw std::runtime_error("unsupported paths format in project: " + project_name);
   }
 
-  const auto items = collect_paths_items(
-      lines,
-      paths_entry->line_index,
-      paths_entry->indent.size(),
-      range->end);
+  const auto items =
+      collect_paths_items(lines, paths_entry->line_index, paths_entry->indent.size(), range->end);
 
   std::size_t remove_begin_index = lines.size();
   std::size_t remove_end_index = lines.size();
@@ -574,17 +558,11 @@ RemoveProjectPathResult remove_project_path(
 
   const std::size_t adjusted_project_end = range->end - removed_line_count;
   const auto remaining_items = collect_paths_items(
-      lines,
-      paths_entry->line_index,
-      paths_entry->indent.size(),
-      adjusted_project_end);
+      lines, paths_entry->line_index, paths_entry->indent.size(), adjusted_project_end);
 
   if (remaining_items.empty()) {
     const std::size_t child_section_end = find_yaml_child_section_end(
-        lines,
-        paths_entry->line_index,
-        paths_entry->indent.size(),
-        adjusted_project_end);
+        lines, paths_entry->line_index, paths_entry->indent.size(), adjusted_project_end);
 
     if (child_section_end > paths_entry->line_index + 1) {
       lines.erase(

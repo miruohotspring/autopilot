@@ -43,7 +43,8 @@ int cmd_delete(const std::optional<std::string>& maybe_project_name) {
         return 1;
       }
     } else {
-      const std::optional<std::string> selected_project = select_project_to_delete(existing_projects);
+      const std::optional<std::string> selected_project =
+          select_project_to_delete(existing_projects);
       if (!selected_project.has_value()) {
         std::cerr << "failed to read project selection\n";
         return 1;

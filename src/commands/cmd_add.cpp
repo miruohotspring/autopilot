@@ -46,7 +46,7 @@ bool is_same_symlink_target(const fs::path& link_path, const fs::path& expected_
   return current_target == expected_target.lexically_normal();
 }
 
-}  // namespace
+} // namespace
 
 int cmd_add(
     const std::string& path_arg,
@@ -83,7 +83,8 @@ int cmd_add(
         return 1;
       }
     } else {
-      const std::optional<std::string> selected_project = select_project_to_add_path(existing_projects);
+      const std::optional<std::string> selected_project =
+          select_project_to_add_path(existing_projects);
       if (!selected_project.has_value()) {
         std::cerr << "failed to read project selection\n";
         return 1;
@@ -152,7 +153,8 @@ int cmd_add(
       const fs::file_status link_status = fs::symlink_status(link_path);
       if (link_status.type() != fs::file_type::not_found) {
         if (!is_same_symlink_target(link_path, absolute_path)) {
-          throw std::runtime_error("link already exists with different target: " + link_path.string());
+          throw std::runtime_error(
+              "link already exists with different target: " + link_path.string());
         }
       } else {
         fs::create_symlink(absolute_path, link_path);

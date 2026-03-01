@@ -74,9 +74,8 @@ std::optional<std::string> select_value_with_prompt(
   }
 }
 
-std::optional<std::string> select_value_with_tui(
-    std::vector<std::string> value_list,
-    const std::string& prompt) {
+std::optional<std::string>
+select_value_with_tui(std::vector<std::string> value_list, const std::string& prompt) {
   if (value_list.empty()) {
     return std::nullopt;
   }
@@ -87,7 +86,8 @@ std::optional<std::string> select_value_with_tui(
   }
   const auto terminal_size = ftxui::Terminal::Size();
   const int ui_width = std::max(1, std::min<int>(static_cast<int>(max_width), terminal_size.dimx));
-  const int ui_height = std::max(2, std::min<int>(static_cast<int>(value_list.size()) + 1, terminal_size.dimy));
+  const int ui_height =
+      std::max(2, std::min<int>(static_cast<int>(value_list.size()) + 1, terminal_size.dimy));
 
   int selected = 0;
   bool confirmed = false;
@@ -175,7 +175,7 @@ std::optional<bool> confirm_yes_no(const std::string& prompt) {
   }
 }
 
-}  // namespace
+} // namespace
 
 std::optional<std::string> select_project_to_delete(const std::set<std::string>& projects) {
   return select_project_with_ui(

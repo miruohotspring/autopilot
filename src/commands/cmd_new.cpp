@@ -54,7 +54,8 @@ int cmd_new(const std::optional<std::string>& maybe_project_name) {
     const bool needs_leading_newline = !file_ends_with_newline(projects_file);
     std::ofstream out(projects_file, std::ios::app);
     if (!out) {
-      throw std::runtime_error("failed to open projects file for append: " + projects_file.string());
+      throw std::runtime_error(
+          "failed to open projects file for append: " + projects_file.string());
     }
     if (needs_leading_newline) {
       out << '\n';
