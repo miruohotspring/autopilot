@@ -1,0 +1,4 @@
+interface:
+  display_name: "Self Recognition"
+  short_description: "Check role and pending tasks before action"
+  default_prompt: "Use $self-recognition to identify the active role and pending tasks."

@@ -44,6 +44,17 @@ $HOME/.autopilot/.claude/skills/self-recognition
 $HOME/.autopilot/.claude/skills/briefing
 ```
 
+## Update managed files
+
+```bash
+ap update
+```
+
+`ap update` copies managed files from this repository's `templates/autopilot` into
+`$HOME/.autopilot`.
+
+Run this command from the autopilot repository root.
+
 ## New project
 
 ```bash
