@@ -33,6 +33,19 @@ assert_file_contains() {
   fi
 }
 
+assert_file_equals() {
+  local path="$1"
+  local expected="$2"
+  local actual
+  actual="$(cat "$path")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "assert failed: expected exact content in $path" >&2
+    echo "expected: $expected" >&2
+    echo "actual  : $actual" >&2
+    exit 1
+  fi
+}
+
 assert_project_block() {
   local path="$1"
   local project="$2"
@@ -89,7 +102,11 @@ mkdir -p "$home2/.autopilot"
 HOME="$home2" "$AP_BIN" new Project-1 >/dev/null
 assert_exists "$home2/.autopilot/projects.yaml"
 assert_exists "$home2/.autopilot/projects/Project-1"
+assert_exists "$home2/.autopilot/projects/Project-1/TODO.md"
+assert_exists "$home2/.autopilot/projects/Project-1/dashboard.md"
 assert_project_block "$home2/.autopilot/projects.yaml" "Project-1"
+assert_file_equals "$home2/.autopilot/projects/Project-1/TODO.md" "# Project-1 TODO"
+assert_file_equals "$home2/.autopilot/projects/Project-1/dashboard.md" "# Project-1 Dashboard"
 
 # Case 3:
 # Duplicate project should fail.
@@ -120,5 +137,7 @@ printf 'Interactive9\n' | HOME="$home2" "$AP_BIN" new >"$stdout5"
 assert_file_contains "$stdout5" "Enter your new project name:"
 assert_project_block "$home2/.autopilot/projects.yaml" "Interactive9"
 assert_exists "$home2/.autopilot/projects/Interactive9"
+assert_file_equals "$home2/.autopilot/projects/Interactive9/TODO.md" "# Interactive9 TODO"
+assert_file_equals "$home2/.autopilot/projects/Interactive9/dashboard.md" "# Interactive9 Dashboard"
 
 echo "all tests passed"

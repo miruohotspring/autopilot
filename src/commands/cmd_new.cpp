@@ -49,7 +49,19 @@ int cmd_new(const std::optional<std::string>& maybe_project_name) {
       return 1;
     }
 
-    fs::create_directories(project_dir_path(project_name));
+    const fs::path new_project_dir = project_dir_path(project_name);
+    fs::create_directories(new_project_dir);
+
+    auto write_heading_file = [&](const fs::path& path, const std::string& suffix) {
+      std::ofstream out_file(path, std::ios::trunc);
+      if (!out_file) {
+        throw std::runtime_error("failed to create project file: " + path.string());
+      }
+      out_file << "# " << project_name << " " << suffix << '\n';
+    };
+
+    write_heading_file(new_project_dir / "TODO.md", "TODO");
+    write_heading_file(new_project_dir / "dashboard.md", "Dashboard");
 
     const bool needs_leading_newline = !file_ends_with_newline(projects_file);
     std::ofstream out(projects_file, std::ios::app);
