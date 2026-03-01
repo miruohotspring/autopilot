@@ -44,6 +44,8 @@ $HOME/.autopilot/.claude/skills/self-recognition
 $HOME/.autopilot/.claude/skills/briefing
 ```
 
+Run this command from the autopilot repository root.
+
 ## Update managed files
 
 ```bash
