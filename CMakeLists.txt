@@ -24,21 +24,10 @@ else()
   FetchContent_MakeAvailable(ftxui)
 endif()
 
-add_executable(
-  ap
-  src/main.cpp
-  src/commands/cmd_add.cpp
-  src/commands/cmd_briefing.cpp
-  src/commands/cmd_delete.cpp
-  src/commands/cmd_init.cpp
-  src/commands/cmd_list.cpp
-  src/commands/cmd_new.cpp
-  src/commands/cmd_rm.cpp
-  src/commands/delete_ui.cpp
-  src/platform/home_dir.cpp
-  src/projects/project_paths.cpp
-  src/projects/project_store.cpp
-)
+file(GLOB_RECURSE AUTOPILOT_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+list(SORT AUTOPILOT_SOURCES)
+
+add_executable(ap ${AUTOPILOT_SOURCES})
 
 target_include_directories(ap PRIVATE include)
 
