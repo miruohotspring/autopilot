@@ -17,7 +17,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 assert_file_contains() {
   local path="$1"
   local expected="$2"
-  if ! grep -q --fixed-strings "$expected" "$path"; then
+  if ! grep -q --fixed-strings -- "$expected" "$path"; then
     echo "assert failed: expected '$expected' in $path" >&2
     echo "--- file content ---" >&2
     cat "$path" >&2
@@ -29,7 +29,7 @@ assert_file_contains() {
 assert_file_not_contains() {
   local path="$1"
   local expected="$2"
-  if grep -q --fixed-strings "$expected" "$path"; then
+  if grep -q --fixed-strings -- "$expected" "$path"; then
     echo "assert failed: expected '$expected' not to appear in $path" >&2
     echo "--- file content ---" >&2
     cat "$path" >&2
@@ -82,7 +82,7 @@ case "$cmd" in
     fi
     exit 0
     ;;
-  switch-client|attach-session)
+  switch-client|attach-session|send-keys)
     exit 0
     ;;
   *)
@@ -118,6 +118,10 @@ assert_file_contains "$state1/tmux.log" "new-session -d -s autopilot"
 assert_file_contains "$state1/tmux.log" "list-windows -t autopilot -F #{window_name}"
 assert_file_contains "$state1/tmux.log" "new-window -t autopilot -n colonel"
 assert_file_contains "$state1/tmux.log" "claude --model sonnet --dangerously-skip-permissions"
+assert_file_contains "$state1/tmux.log" "--append-system-prompt"
+assert_file_contains "$state1/tmux.log" "日本語"
+assert_file_contains "$state1/tmux.log" "\$self-recognition"
+assert_file_contains "$state1/tmux.log" "\$briefing"
 assert_file_contains "$state1/tmux.log" "attach-session -t autopilot:colonel"
 assert_file_not_contains "$state1/tmux.log" "switch-client -t autopilot:colonel"
 
@@ -168,6 +172,8 @@ fi
 assert_file_not_contains "$state3/tmux.log" "new-session -d -s autopilot"
 assert_file_not_contains "$state3/tmux.log" "new-window -t autopilot -n colonel"
 assert_file_contains "$state3/tmux.log" "list-windows -t autopilot -F #{window_name}"
+assert_file_contains "$state3/tmux.log" "send-keys -t autopilot:colonel"
+assert_file_contains "$state3/tmux.log" "\$self-recognition"
 assert_file_contains "$state3/tmux.log" "attach-session -t autopilot:colonel"
 assert_file_not_contains "$state3/tmux.log" "switch-client -t autopilot:colonel"
 

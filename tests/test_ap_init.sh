@@ -54,6 +54,11 @@ mkdir -p "$home1"
 HOME="$home1" "$AP_BIN" init >/dev/null
 assert_exists "$home1/.autopilot"
 assert_exists "$home1/.autopilot/projects"
+assert_exists "$home1/.autopilot/CLAUDE.md"
+assert_exists "$home1/.autopilot/.claude/skills/self-recognition/SKILL.md"
+assert_exists "$home1/.autopilot/.claude/skills/self-recognition/agents/openai.yaml"
+assert_exists "$home1/.autopilot/.claude/skills/briefing/SKILL.md"
+assert_exists "$home1/.autopilot/.claude/skills/briefing/agents/openai.yaml"
 assert_not_exists "$home1/.autopilot.bak"
 
 # Case 2:
@@ -66,6 +71,9 @@ echo "old-state" > "$home2/.autopilot/state.txt"
 HOME="$home2" "$AP_BIN" init >/dev/null
 assert_exists "$home2/.autopilot"
 assert_exists "$home2/.autopilot/projects"
+assert_exists "$home2/.autopilot/CLAUDE.md"
+assert_exists "$home2/.autopilot/.claude/skills/self-recognition/SKILL.md"
+assert_exists "$home2/.autopilot/.claude/skills/briefing/SKILL.md"
 assert_exists "$home2/.autopilot.bak"
 assert_exists "$home2/.autopilot.bak/state.txt"
 assert_file_content "$home2/.autopilot.bak/state.txt" "old-state"

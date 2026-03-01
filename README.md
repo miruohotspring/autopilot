@@ -37,6 +37,12 @@ ap init
 
 It will create `$HOME/.autopilot` directory.
 It also creates `$HOME/.autopilot/projects`.
+It also creates Claude Code project skills in:
+
+```text
+$HOME/.autopilot/.claude/skills/self-recognition
+$HOME/.autopilot/.claude/skills/briefing
+```
 
 ## New project
 
@@ -65,6 +71,11 @@ It also creates project directory:
 ```text
 $HOME/.autopilot/projects/<project_name>
 ```
+
+`ap new` also creates:
+
+- `TODO.md`
+- `dashboard.md` (captain -> colonel status handoff template)
 
 ## Delete project
 
@@ -164,10 +175,19 @@ If `-p <project_name>` is omitted, `ap` asks you to select a project.
 ap briefing
 ```
 
-`ap briefing` creates tmux session `autopilot`, starts `claude --model sonnet --dangerously-skip-permissions`
-in `autopilot:colonel`, and then:
+`ap briefing` creates tmux session `autopilot`, starts Claude in `autopilot:colonel`,
+and injects a bootstrap prompt so colonel runs `$self-recognition` first and is ready for `$briefing`.
+It then:
 
 - inside tmux: switches to `autopilot:colonel`
 - outside tmux: attaches to `autopilot:colonel`
 If session `autopilot` already exists, `ap briefing` reuses it. It checks whether window `colonel`
 exists and creates it only when missing.
+
+`$briefing` collects and summarizes:
+
+```text
+$HOME/.autopilot/projects/<project_name>/dashboard.md
+```
+
+and surfaces blockers requiring general instruction/approval.

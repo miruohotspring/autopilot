@@ -23,6 +23,18 @@ std::string shell_quote(const std::string& s) {
   return quoted;
 }
 
+const char* kColonelSystemPrompt =
+    "あなたは autopilot オーケストレーションの colonel です。"
+    "general はユーザー、captain は各プロジェクト責任者です。"
+    "colonel は実装作業を行わず、統括・報告・相談・判断依頼のみを行います。"
+    "general との会話は常に日本語で行ってください。";
+
+const char* kBriefingBootstrapPrompt =
+    "Run $self-recognition now. "
+    "After self-recognition, be ready to run $briefing and wait for general's instruction. "
+    "When asked for briefing, gather ~/.autopilot/projects/*/dashboard.md and report cross-project "
+    "status plus blockers that require general's approval or instruction.";
+
 } // namespace
 
 int cmd_briefing() {
@@ -45,12 +57,23 @@ int cmd_briefing() {
                       .c_str());
   if (has_colonel_window != 0) {
     const fs::path autopilot_dir = fs::path(get_home_dir()) / ".autopilot";
-    const std::string window_cmd = "cd " + shell_quote(autopilot_dir.string()) +
-                                   " && claude --model sonnet --dangerously-skip-permissions";
+    const std::string claude_cmd =
+        "claude --model sonnet --dangerously-skip-permissions"
+        " --append-system-prompt " +
+        shell_quote(kColonelSystemPrompt) + " " + shell_quote(kBriefingBootstrapPrompt);
+    const std::string window_cmd = "cd " + shell_quote(autopilot_dir.string()) + " && " + claude_cmd;
     const std::string create_window_cmd =
         "tmux new-window -t " + session + " -n colonel " + shell_quote(window_cmd);
     if (std::system(create_window_cmd.c_str()) != 0) {
       std::cerr << "ap briefing failed: failed to create tmux window\n";
+      return 1;
+    }
+  } else {
+    // When reusing the colonel window, push the bootstrap task into the live Claude session.
+    const std::string send_keys_cmd =
+        "tmux send-keys -t " + target + " " + shell_quote(kBriefingBootstrapPrompt) + " C-m";
+    if (std::system(send_keys_cmd.c_str()) != 0) {
+      std::cerr << "ap briefing failed: failed to send bootstrap prompt to colonel\n";
       return 1;
     }
   }

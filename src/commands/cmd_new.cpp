@@ -60,8 +60,28 @@ int cmd_new(const std::optional<std::string>& maybe_project_name) {
       out_file << "# " << project_name << " " << suffix << '\n';
     };
 
+    auto write_dashboard_file = [&](const fs::path& path) {
+      std::ofstream out_file(path, std::ios::trunc);
+      if (!out_file) {
+        throw std::runtime_error("failed to create project file: " + path.string());
+      }
+
+      out_file << "# " << project_name << " Dashboard\n\n";
+      out_file << "## Status\n";
+      out_file << "- summary:\n";
+      out_file << "- updated_at:\n\n";
+      out_file << "## Progress\n";
+      out_file << "-\n\n";
+      out_file << "## Blockers\n";
+      out_file << "-\n\n";
+      out_file << "## Needs General Decision\n";
+      out_file << "-\n\n";
+      out_file << "## Next Actions\n";
+      out_file << "-\n";
+    };
+
     write_heading_file(new_project_dir / "TODO.md", "TODO");
-    write_heading_file(new_project_dir / "dashboard.md", "Dashboard");
+    write_dashboard_file(new_project_dir / "dashboard.md");
 
     const bool needs_leading_newline = !file_ends_with_newline(projects_file);
     std::ofstream out(projects_file, std::ios::app);
