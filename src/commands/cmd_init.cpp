@@ -37,7 +37,7 @@ int cmd_init() {
     }
 
     fs::create_directories(projects_dir);
-    sync_managed_templates(template_root, autopilot_dir, std::cout);
+    sync_managed_templates(template_root, home, autopilot_dir, std::cout);
 
     std::cout << "created: " << autopilot_dir << '\n';
     std::cout << "created: " << projects_dir << '\n';

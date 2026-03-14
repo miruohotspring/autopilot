@@ -76,7 +76,8 @@ assert_exists "$home1/.autopilot/skills/ap-self-recognition/SKILL.md"
 assert_exists "$home1/.autopilot/skills/ap-self-recognition/agents/openai.yaml"
 assert_exists "$home1/.autopilot/skills/ap-briefing/SKILL.md"
 assert_exists "$home1/.autopilot/skills/ap-briefing/agents/openai.yaml"
-assert_symlink_target "$home1/.autopilot/.claude/skills" "../skills"
+assert_not_exists "$home1/.codex"
+assert_not_exists "$home1/.claude"
 assert_not_exists "$home1/.autopilot.bak"
 
 # Case 2:
@@ -84,7 +85,7 @@ assert_not_exists "$home1/.autopilot.bak"
 # and a fresh ~/.autopilot should be created.
 echo "[test] renames existing ~/.autopilot to ~/.autopilot.bak and recreates ~/.autopilot"
 home2="$TMP_DIR/home2"
-mkdir -p "$home2/.autopilot"
+mkdir -p "$home2/.autopilot" "$home2/.codex" "$home2/.claude"
 echo "old-state" > "$home2/.autopilot/state.txt"
 HOME="$home2" "$AP_BIN" init >/dev/null
 assert_exists "$home2/.autopilot"
@@ -92,7 +93,10 @@ assert_exists "$home2/.autopilot/projects"
 assert_exists "$home2/.autopilot/CLAUDE.md"
 assert_exists "$home2/.autopilot/skills/ap-self-recognition/SKILL.md"
 assert_exists "$home2/.autopilot/skills/ap-briefing/SKILL.md"
-assert_symlink_target "$home2/.autopilot/.claude/skills" "../skills"
+assert_symlink_target "$home2/.codex/skills/ap-self-recognition" "../../.autopilot/skills/ap-self-recognition"
+assert_symlink_target "$home2/.codex/skills/ap-briefing" "../../.autopilot/skills/ap-briefing"
+assert_symlink_target "$home2/.claude/skills/ap-self-recognition" "../../.autopilot/skills/ap-self-recognition"
+assert_symlink_target "$home2/.claude/skills/ap-briefing" "../../.autopilot/skills/ap-briefing"
 assert_exists "$home2/.autopilot.bak"
 assert_exists "$home2/.autopilot.bak/state.txt"
 assert_file_content "$home2/.autopilot.bak/state.txt" "old-state"
@@ -117,6 +121,16 @@ assert_exists "$home3/.autopilot/live.txt"
 assert_exists "$home3/.autopilot.bak/backup.txt"
 
 # Case 4:
+# Existing ~/.codex should get a skills symlink, while missing ~/.claude stays untouched.
+echo "[test] creates managed skill links in ~/.codex only when ~/.codex exists"
+home4="$TMP_DIR/home4"
+mkdir -p "$home4/.codex"
+HOME="$home4" "$AP_BIN" init >/dev/null
+assert_symlink_target "$home4/.codex/skills/ap-self-recognition" "../../.autopilot/skills/ap-self-recognition"
+assert_symlink_target "$home4/.codex/skills/ap-briefing" "../../.autopilot/skills/ap-briefing"
+assert_not_exists "$home4/.claude"
+
+# Case 5:
 # Invalid invocation should return non-zero.
 echo "[test] returns non-zero for invalid arguments"
 set +e

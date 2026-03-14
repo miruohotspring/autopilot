@@ -10,7 +10,8 @@
 namespace fs = std::filesystem;
 
 int cmd_update() {
-  const fs::path autopilot_dir = fs::path(get_home_dir()) / ".autopilot";
+  const fs::path home = get_home_dir();
+  const fs::path autopilot_dir = home / ".autopilot";
   if (!fs::exists(autopilot_dir) || !fs::is_directory(autopilot_dir)) {
     std::cerr << "Please run ap init first\n";
     return 1;
@@ -28,7 +29,7 @@ int cmd_update() {
   }
 
   try {
-    sync_managed_templates(template_root, autopilot_dir, std::cout);
+    sync_managed_templates(template_root, home, autopilot_dir, std::cout);
     return 0;
   } catch (const std::exception& e) {
     std::cerr << "ap update failed: " << e.what() << '\n';

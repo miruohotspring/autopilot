@@ -13,5 +13,6 @@ std::optional<std::filesystem::path>
 first_missing_managed_template(const std::filesystem::path& template_root);
 void sync_managed_templates(
     const std::filesystem::path& template_root,
+    const std::filesystem::path& home_dir,
     const std::filesystem::path& autopilot_dir,
     std::ostream& out);

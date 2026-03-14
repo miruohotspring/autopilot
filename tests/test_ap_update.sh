@@ -81,7 +81,7 @@ assert_file_contains "$stderr1" "Please run ap init first"
 # Running from repo root should sync managed templates into ~/.autopilot.
 echo "[test] syncs managed files from templates/autopilot"
 home2="$TMP_DIR/home2"
-mkdir -p "$home2/.autopilot"
+mkdir -p "$home2/.autopilot" "$home2/.codex" "$home2/.claude"
 echo "old content" >"$home2/.autopilot/CLAUDE.md"
 stdout2="$TMP_DIR/stdout2.txt"
 stderr2="$TMP_DIR/stderr2.txt"
@@ -107,26 +107,38 @@ assert_file_contains "$stdout2" "updated: \"$home2/.autopilot/CLAUDE.md\""
 assert_same_file "$home2/.autopilot/CLAUDE.md" "$ROOT_DIR/templates/autopilot/CLAUDE.md"
 assert_same_file \
   "$home2/.autopilot/skills/ap-self-recognition/SKILL.md" \
-  "$ROOT_DIR/templates/autopilot/.claude/skills/ap-self-recognition/SKILL.md"
+  "$ROOT_DIR/templates/autopilot/skills/ap-self-recognition/SKILL.md"
 assert_same_file \
   "$home2/.autopilot/skills/ap-self-recognition/agents/openai.yaml" \
-  "$ROOT_DIR/templates/autopilot/.claude/skills/ap-self-recognition/agents/openai.yaml"
+  "$ROOT_DIR/templates/autopilot/skills/ap-self-recognition/agents/openai.yaml"
 assert_same_file \
   "$home2/.autopilot/skills/ap-briefing/SKILL.md" \
-  "$ROOT_DIR/templates/autopilot/.claude/skills/ap-briefing/SKILL.md"
+  "$ROOT_DIR/templates/autopilot/skills/ap-briefing/SKILL.md"
 assert_same_file \
   "$home2/.autopilot/skills/ap-briefing/agents/openai.yaml" \
-  "$ROOT_DIR/templates/autopilot/.claude/skills/ap-briefing/agents/openai.yaml"
-assert_symlink_target "$home2/.autopilot/.claude/skills" "../skills"
+  "$ROOT_DIR/templates/autopilot/skills/ap-briefing/agents/openai.yaml"
 assert_file_contains "$stdout2" "updated: \"$home2/.autopilot/skills/ap-self-recognition/SKILL.md\""
-assert_file_contains "$stdout2" "updated: \"$home2/.autopilot/.claude/skills\""
+assert_file_contains "$stdout2" "updated: \"$home2/.codex/skills/ap-self-recognition\""
+assert_file_contains "$stdout2" "updated: \"$home2/.claude/skills/ap-briefing\""
+assert_symlink_target "$home2/.codex/skills/ap-self-recognition" "../../.autopilot/skills/ap-self-recognition"
+assert_symlink_target "$home2/.codex/skills/ap-briefing" "../../.autopilot/skills/ap-briefing"
+assert_symlink_target "$home2/.claude/skills/ap-self-recognition" "../../.autopilot/skills/ap-self-recognition"
+assert_symlink_target "$home2/.claude/skills/ap-briefing" "../../.autopilot/skills/ap-briefing"
 
 # Case 3:
-# Existing real .claude/skills directory should be replaced by a symlink.
-echo "[test] replaces legacy .claude/skills directory with symlink"
+# Existing managed skill directories should be replaced by symlinks without touching others.
+echo "[test] replaces only managed home skill directories with symlinks"
 home3="$TMP_DIR/home3"
-mkdir -p "$home3/.autopilot/.claude/skills/legacy-skill"
-echo "legacy" >"$home3/.autopilot/.claude/skills/legacy-skill/SKILL.md"
+mkdir -p \
+  "$home3/.autopilot" \
+  "$home3/.codex/skills/ap-self-recognition" \
+  "$home3/.codex/skills/.system" \
+  "$home3/.claude/skills/ap-briefing" \
+  "$home3/.claude/skills/.system"
+echo "legacy" >"$home3/.codex/skills/ap-self-recognition/SKILL.md"
+echo "keep" >"$home3/.codex/skills/.system/SKILL.md"
+echo "legacy" >"$home3/.claude/skills/ap-briefing/SKILL.md"
+echo "keep" >"$home3/.claude/skills/.system/SKILL.md"
 stdout3="$TMP_DIR/stdout3.txt"
 stderr3="$TMP_DIR/stderr3.txt"
 set +e
@@ -134,27 +146,56 @@ set +e
 status3=$?
 set -e
 if [[ "$status3" -ne 0 ]]; then
-  echo "assert failed: expected ap update to migrate legacy .claude/skills directory" >&2
+  echo "assert failed: expected ap update to migrate managed home skills directories" >&2
   cat "$stderr3" >&2
   exit 1
 fi
 assert_exists "$home3/.autopilot/skills/ap-self-recognition/SKILL.md"
-assert_symlink_target "$home3/.autopilot/.claude/skills" "../skills"
+assert_symlink_target "$home3/.codex/skills/ap-self-recognition" "../../.autopilot/skills/ap-self-recognition"
+assert_symlink_target "$home3/.codex/skills/ap-briefing" "../../.autopilot/skills/ap-briefing"
+assert_symlink_target "$home3/.claude/skills/ap-self-recognition" "../../.autopilot/skills/ap-self-recognition"
+assert_symlink_target "$home3/.claude/skills/ap-briefing" "../../.autopilot/skills/ap-briefing"
+assert_exists "$home3/.codex/skills/.system/SKILL.md"
+assert_exists "$home3/.claude/skills/.system/SKILL.md"
 
 # Case 4:
-# Outside repo root, command should fail to locate template directory.
-echo "[test] fails outside repository root"
+# Self-referential managed skill symlinks under ~/.autopilot should be repaired.
+echo "[test] repairs self-referential managed skill symlinks"
 home4="$TMP_DIR/home4"
-mkdir -p "$home4/.autopilot"
+mkdir -p "$home4/.autopilot/skills" "$home4/.codex" "$home4/.claude"
+ln -s ../../.autopilot/skills/ap-self-recognition \
+  "$home4/.autopilot/skills/ap-self-recognition"
+stdout4="$TMP_DIR/stdout4.txt"
 stderr4="$TMP_DIR/stderr4.txt"
 set +e
-(cd "$TMP_DIR" && HOME="$home4" "$AP_BIN" update 2>"$stderr4")
+(cd "$ROOT_DIR" && HOME="$home4" "$AP_BIN" update >"$stdout4" 2>"$stderr4")
 status4=$?
 set -e
-if [[ "$status4" -eq 0 ]]; then
+if [[ "$status4" -ne 0 ]]; then
+  echo "assert failed: expected ap update to repair self-referential managed skill symlink" >&2
+  cat "$stderr4" >&2
+  exit 1
+fi
+assert_exists "$home4/.autopilot/skills/ap-self-recognition/SKILL.md"
+assert_same_file \
+  "$home4/.autopilot/skills/ap-self-recognition/SKILL.md" \
+  "$ROOT_DIR/templates/autopilot/skills/ap-self-recognition/SKILL.md"
+assert_symlink_target "$home4/.codex/skills/ap-self-recognition" "../../.autopilot/skills/ap-self-recognition"
+
+# Case 5:
+# Outside repo root, command should fail to locate template directory.
+echo "[test] fails outside repository root"
+home5="$TMP_DIR/home5"
+mkdir -p "$home5/.autopilot"
+stderr5="$TMP_DIR/stderr5.txt"
+set +e
+(cd "$TMP_DIR" && HOME="$home5" "$AP_BIN" update 2>"$stderr5")
+status5=$?
+set -e
+if [[ "$status5" -eq 0 ]]; then
   echo "assert failed: expected ap update to fail outside repository root" >&2
   exit 1
 fi
-assert_file_contains "$stderr4" "run from autopilot repository root"
+assert_file_contains "$stderr5" "run from autopilot repository root"
 
 echo "all tests passed"

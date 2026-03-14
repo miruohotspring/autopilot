@@ -44,10 +44,18 @@ $HOME/.autopilot/skills/ap-self-recognition
 $HOME/.autopilot/skills/ap-briefing
 ```
 
-and creates this symlink:
+If `$HOME/.codex` exists, it also creates these symlinks:
 
 ```text
-$HOME/.autopilot/.claude/skills -> ../skills
+$HOME/.codex/skills/ap-self-recognition -> ../../.autopilot/skills/ap-self-recognition
+$HOME/.codex/skills/ap-briefing -> ../../.autopilot/skills/ap-briefing
+```
+
+If `$HOME/.claude` exists, it also creates:
+
+```text
+$HOME/.claude/skills/ap-self-recognition -> ../../.autopilot/skills/ap-self-recognition
+$HOME/.claude/skills/ap-briefing -> ../../.autopilot/skills/ap-briefing
 ```
 
 Run this command from the autopilot repository root.
