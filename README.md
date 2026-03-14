@@ -204,3 +204,12 @@ $HOME/.autopilot/projects/<project_name>/dashboard.md
 ```
 
 and surfaces blockers requiring general instruction/approval.
+
+## Kill tmux session
+
+```bash
+ap kill
+```
+
+If tmux session `autopilot` exists, `ap kill` terminates it.
+If it does not exist, `ap kill` exits successfully without changes.

@@ -5,6 +5,7 @@
 #include "autopilot/commands/cmd_new.hpp"
 #include "autopilot/commands/cmd_rm.hpp"
 #include "autopilot/commands/cmd_briefing.hpp"
+#include "autopilot/commands/cmd_kill.hpp"
 #include "autopilot/commands/cmd_update.hpp"
 
 #include <iostream>
@@ -19,6 +20,7 @@ void print_usage(const char* prog) {
   std::cerr << "       " << prog << " add <path> [-n <name>] [-p <project_name>]\n";
   std::cerr << "       " << prog << " rm [-p <project_name>]\n";
   std::cerr << "       " << prog << " briefing\n";
+  std::cerr << "       " << prog << " kill\n";
   std::cerr << "       " << prog << " update\n";
 }
 
@@ -113,6 +115,14 @@ int main(int argc, char** argv) {
       return 1;
     }
     return cmd_briefing();
+  }
+
+  if (cmd == "kill") {
+    if (argc != 2) {
+      print_usage(argv[0]);
+      return 1;
+    }
+    return cmd_kill();
   }
 
   if (cmd == "update") {
