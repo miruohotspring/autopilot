@@ -8,8 +8,9 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr std::array<const char*, 5> kManagedRelativePaths = {{
+constexpr std::array<const char*, 6> kManagedRelativePaths = {{
     "CLAUDE.md",
+    "config.toml",
     "skills/ap-self-recognition/SKILL.md",
     "skills/ap-self-recognition/agents/openai.yaml",
     "skills/ap-briefing/SKILL.md",

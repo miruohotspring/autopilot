@@ -37,6 +37,7 @@ ap init
 
 It will create `$HOME/.autopilot` directory.
 It also creates `$HOME/.autopilot/projects`.
+It also creates `$HOME/.autopilot/config.toml`.
 It also creates Claude Code project skills in:
 
 ```text
@@ -70,6 +71,27 @@ ap update
 `$HOME/.autopilot`.
 
 Run this command from the autopilot repository root.
+
+## Start agent configuration
+
+`ap start` reads the preferred agent from:
+
+```text
+$HOME/.autopilot/config.toml
+```
+
+Current format:
+
+```toml
+[start]
+agent = "claude"
+```
+
+Supported values are `claude` and `codex`.
+
+- If `config.toml` sets `start.agent`, `ap start` uses that agent.
+- If the configured CLI is not found in `PATH`, `ap start` fails.
+- If `start.agent` is not set, `ap start` falls back to automatic detection.
 
 ## New project
 
@@ -195,6 +217,36 @@ ap rm -p <project_name>
 If `-p <project_name>` is omitted, `ap` asks you to select a project.
 
 `ap rm` then shows the path list in that project, asks which path to remove, and confirms with `y/n`.
+
+## Start task
+
+```bash
+ap start [project_name]
+```
+
+If `<project_name>` is omitted, `ap` asks you to select a project.
+
+`ap start` reads the target project's `TODO.md` and picks the first unchecked task it finds.
+
+Current `TODO.md` format is intentionally minimal. A runnable task line must be exactly this checklist form:
+
+```markdown
+- [ ] Implement ap start command
+- [ ] Add integration tests
+```
+
+Completed tasks must use:
+
+```markdown
+- [x] Implement ap start command
+```
+
+Notes:
+
+- `ap start` only recognizes lines that start with `- [ ] `.
+- It scans `TODO.md` from top to bottom and runs the first matching line.
+- Headings and plain bullet lists are ignored.
+- If no `- [ ] ...` line exists, `ap start` fails with `ap start failed: no runnable task found in TODO.md`.
 
 ## Briefing tmux session
 

@@ -5,6 +5,11 @@
 #include <string>
 #include <vector>
 
+struct ProjectPathEntry {
+  std::string name;
+  std::string path;
+};
+
 enum class AddProjectPathResult {
   Added,
   AlreadyExists,
@@ -21,6 +26,9 @@ enum class RemoveProjectPathResult {
 
 bool is_valid_project_name(const std::string& name);
 std::set<std::string> load_top_level_projects(const std::filesystem::path& projects_file);
+std::vector<ProjectPathEntry> load_project_path_entries(
+    const std::filesystem::path& projects_file,
+    const std::string& project_name);
 std::vector<std::string> load_project_paths(
     const std::filesystem::path& projects_file,
     const std::string& project_name);

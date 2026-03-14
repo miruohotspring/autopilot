@@ -5,7 +5,7 @@
 #include <iosfwd>
 #include <optional>
 
-using ManagedTemplateList = std::array<const char*, 5>;
+using ManagedTemplateList = std::array<const char*, 6>;
 
 std::filesystem::path managed_templates_root_from_cwd();
 const ManagedTemplateList& managed_template_relative_paths();

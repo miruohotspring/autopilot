@@ -319,8 +319,8 @@ std::set<std::string> load_top_level_projects(const fs::path& projects_file) {
   return projects;
 }
 
-std::vector<std::string>
-load_project_paths(const fs::path& projects_file, const std::string& project_name) {
+std::vector<ProjectPathEntry>
+load_project_path_entries(const fs::path& projects_file, const std::string& project_name) {
   const std::vector<std::string> lines = read_all_lines(projects_file);
   const std::optional<ProjectRange> range = find_project_range(lines, project_name);
   if (!range.has_value()) {
@@ -342,13 +342,24 @@ load_project_paths(const fs::path& projects_file, const std::string& project_nam
   const auto items =
       collect_paths_items(lines, paths_entry->line_index, paths_entry->indent.size(), range->end);
 
-  std::vector<std::string> paths;
-  paths.reserve(items.size());
+  std::vector<ProjectPathEntry> entries;
+  entries.reserve(items.size());
   for (const auto& item : items) {
-    if (!item.path.has_value()) {
-      throw std::runtime_error("unsupported paths item format: missing path");
+    if (!item.name.has_value() || !item.path.has_value()) {
+      throw std::runtime_error("unsupported paths item format: missing name or path");
     }
-    paths.push_back(*item.path);
+    entries.push_back(ProjectPathEntry{*item.name, *item.path});
+  }
+  return entries;
+}
+
+std::vector<std::string>
+load_project_paths(const fs::path& projects_file, const std::string& project_name) {
+  const auto entries = load_project_path_entries(projects_file, project_name);
+  std::vector<std::string> paths;
+  paths.reserve(entries.size());
+  for (const auto& entry : entries) {
+    paths.push_back(entry.path);
   }
   return paths;
 }

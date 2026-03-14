@@ -201,6 +201,14 @@ std::optional<std::string> select_project_to_remove_path(const std::set<std::str
       "Enter number to remove path: ");
 }
 
+std::optional<std::string> select_project_to_start(const std::set<std::string>& projects) {
+  return select_project_with_ui(
+      projects,
+      "Select project to start:",
+      "? Select project to start (Use arrow keys or j/k)",
+      "Enter number to start: ");
+}
+
 std::optional<std::string> select_path_to_remove(const std::vector<std::string>& paths) {
   return select_path_with_ui(
       paths,

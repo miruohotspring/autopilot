@@ -1,4 +1,5 @@
 #include "autopilot/commands/cmd_add.hpp"
+#include "autopilot/commands/cmd_start.hpp"
 #include "autopilot/commands/cmd_init.hpp"
 #include "autopilot/commands/cmd_delete.hpp"
 #include "autopilot/commands/cmd_list.hpp"
@@ -19,6 +20,7 @@ void print_usage(const char* prog) {
   std::cerr << "       " << prog << " list\n";
   std::cerr << "       " << prog << " add <path> [-n <name>] [-p <project_name>]\n";
   std::cerr << "       " << prog << " rm [-p <project_name>]\n";
+  std::cerr << "       " << prog << " start [project_name]\n";
   std::cerr << "       " << prog << " briefing\n";
   std::cerr << "       " << prog << " kill\n";
   std::cerr << "       " << prog << " update\n";
@@ -104,6 +106,17 @@ int main(int argc, char** argv) {
     }
     if (argc == 4 && std::string(argv[2]) == "-p") {
       return cmd_rm(std::string(argv[3]));
+    }
+    print_usage(argv[0]);
+    return 1;
+  }
+
+  if (cmd == "start") {
+    if (argc == 2) {
+      return cmd_start(std::nullopt);
+    }
+    if (argc == 3) {
+      return cmd_start(std::string(argv[2]));
     }
     print_usage(argv[0]);
     return 1;

@@ -97,6 +97,7 @@ fi
 
 for rel in \
   "CLAUDE.md" \
+  "config.toml" \
   "skills/ap-self-recognition/SKILL.md" \
   "skills/ap-self-recognition/agents/openai.yaml" \
   "skills/ap-briefing/SKILL.md" \
@@ -105,6 +106,7 @@ for rel in \
 done
 assert_file_contains "$stdout2" "updated: \"$home2/.autopilot/CLAUDE.md\""
 assert_same_file "$home2/.autopilot/CLAUDE.md" "$ROOT_DIR/templates/autopilot/CLAUDE.md"
+assert_same_file "$home2/.autopilot/config.toml" "$ROOT_DIR/templates/autopilot/config.toml"
 assert_same_file \
   "$home2/.autopilot/skills/ap-self-recognition/SKILL.md" \
   "$ROOT_DIR/templates/autopilot/skills/ap-self-recognition/SKILL.md"

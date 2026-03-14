@@ -1,0 +1,4 @@
+# autopilot managed config
+
+[start]
+agent = "claude"
