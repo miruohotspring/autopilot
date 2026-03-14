@@ -32,6 +32,23 @@ assert_not_exists() {
   fi
 }
 
+assert_symlink_target() {
+  local path="$1"
+  local expected="$2"
+  if [[ ! -L "$path" ]]; then
+    echo "assert failed: expected symlink: $path" >&2
+    exit 1
+  fi
+  local actual
+  actual="$(readlink "$path")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "assert failed: symlink target mismatch for $path" >&2
+    echo "expected: $expected" >&2
+    echo "actual:   $actual" >&2
+    exit 1
+  fi
+}
+
 # Assert helper: file content must match exactly.
 assert_file_content() {
   local path="$1"
@@ -55,10 +72,11 @@ HOME="$home1" "$AP_BIN" init >/dev/null
 assert_exists "$home1/.autopilot"
 assert_exists "$home1/.autopilot/projects"
 assert_exists "$home1/.autopilot/CLAUDE.md"
-assert_exists "$home1/.autopilot/.claude/skills/self-recognition/SKILL.md"
-assert_exists "$home1/.autopilot/.claude/skills/self-recognition/agents/openai.yaml"
-assert_exists "$home1/.autopilot/.claude/skills/briefing/SKILL.md"
-assert_exists "$home1/.autopilot/.claude/skills/briefing/agents/openai.yaml"
+assert_exists "$home1/.autopilot/skills/ap-self-recognition/SKILL.md"
+assert_exists "$home1/.autopilot/skills/ap-self-recognition/agents/openai.yaml"
+assert_exists "$home1/.autopilot/skills/ap-briefing/SKILL.md"
+assert_exists "$home1/.autopilot/skills/ap-briefing/agents/openai.yaml"
+assert_symlink_target "$home1/.autopilot/.claude/skills" "../skills"
 assert_not_exists "$home1/.autopilot.bak"
 
 # Case 2:
@@ -72,8 +90,9 @@ HOME="$home2" "$AP_BIN" init >/dev/null
 assert_exists "$home2/.autopilot"
 assert_exists "$home2/.autopilot/projects"
 assert_exists "$home2/.autopilot/CLAUDE.md"
-assert_exists "$home2/.autopilot/.claude/skills/self-recognition/SKILL.md"
-assert_exists "$home2/.autopilot/.claude/skills/briefing/SKILL.md"
+assert_exists "$home2/.autopilot/skills/ap-self-recognition/SKILL.md"
+assert_exists "$home2/.autopilot/skills/ap-briefing/SKILL.md"
+assert_symlink_target "$home2/.autopilot/.claude/skills" "../skills"
 assert_exists "$home2/.autopilot.bak"
 assert_exists "$home2/.autopilot.bak/state.txt"
 assert_file_content "$home2/.autopilot.bak/state.txt" "old-state"

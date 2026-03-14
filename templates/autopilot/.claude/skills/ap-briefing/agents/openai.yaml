@@ -1,0 +1,4 @@
+interface:
+  display_name: "AP Briefing"
+  short_description: "Summarize autopilot dashboards for general"
+  default_prompt: "Use $ap-briefing to prepare a colonel report from all dashboards."

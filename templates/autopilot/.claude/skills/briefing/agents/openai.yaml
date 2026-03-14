@@ -1,4 +1,0 @@
-interface:
-  display_name: "Briefing"
-  short_description: "Summarize project dashboards for general"
-  default_prompt: "Use $briefing to prepare a colonel report from all dashboards."

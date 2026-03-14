@@ -1,5 +1,5 @@
 ---
-name: briefing
+name: ap-briefing
 description: Colonel-only skill to gather all project dashboards from ~/.autopilot/projects, summarize status for general, and surface blockers that require instructions or approval.
 ---
 
@@ -7,7 +7,7 @@ description: Colonel-only skill to gather all project dashboards from ~/.autopil
 
 ## Scope Gate
 - This skill is for colonel only.
-- Run $self-recognition first.
+- Run $ap-self-recognition first.
 - If current role is not colonel, stop and report the mismatch.
 - Communicate with general in Japanese.
 

@@ -44,6 +44,23 @@ assert_same_file() {
   fi
 }
 
+assert_symlink_target() {
+  local path="$1"
+  local expected="$2"
+  if [[ ! -L "$path" ]]; then
+    echo "assert failed: expected symlink: $path" >&2
+    exit 1
+  fi
+  local actual
+  actual="$(readlink "$path")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "assert failed: symlink target mismatch for $path" >&2
+    echo "expected: $expected" >&2
+    echo "actual:   $actual" >&2
+    exit 1
+  fi
+}
+
 # Case 1:
 # Without ~/.autopilot, command should fail with guidance.
 echo "[test] fails when ~/.autopilot does not exist"
@@ -80,29 +97,64 @@ fi
 
 for rel in \
   "CLAUDE.md" \
-  ".claude/skills/self-recognition/SKILL.md" \
-  ".claude/skills/self-recognition/agents/openai.yaml" \
-  ".claude/skills/briefing/SKILL.md" \
-  ".claude/skills/briefing/agents/openai.yaml"; do
+  "skills/ap-self-recognition/SKILL.md" \
+  "skills/ap-self-recognition/agents/openai.yaml" \
+  "skills/ap-briefing/SKILL.md" \
+  "skills/ap-briefing/agents/openai.yaml"; do
   assert_exists "$home2/.autopilot/$rel"
-  assert_same_file "$home2/.autopilot/$rel" "$ROOT_DIR/templates/autopilot/$rel"
 done
 assert_file_contains "$stdout2" "updated: \"$home2/.autopilot/CLAUDE.md\""
+assert_same_file "$home2/.autopilot/CLAUDE.md" "$ROOT_DIR/templates/autopilot/CLAUDE.md"
+assert_same_file \
+  "$home2/.autopilot/skills/ap-self-recognition/SKILL.md" \
+  "$ROOT_DIR/templates/autopilot/.claude/skills/ap-self-recognition/SKILL.md"
+assert_same_file \
+  "$home2/.autopilot/skills/ap-self-recognition/agents/openai.yaml" \
+  "$ROOT_DIR/templates/autopilot/.claude/skills/ap-self-recognition/agents/openai.yaml"
+assert_same_file \
+  "$home2/.autopilot/skills/ap-briefing/SKILL.md" \
+  "$ROOT_DIR/templates/autopilot/.claude/skills/ap-briefing/SKILL.md"
+assert_same_file \
+  "$home2/.autopilot/skills/ap-briefing/agents/openai.yaml" \
+  "$ROOT_DIR/templates/autopilot/.claude/skills/ap-briefing/agents/openai.yaml"
+assert_symlink_target "$home2/.autopilot/.claude/skills" "../skills"
+assert_file_contains "$stdout2" "updated: \"$home2/.autopilot/skills/ap-self-recognition/SKILL.md\""
+assert_file_contains "$stdout2" "updated: \"$home2/.autopilot/.claude/skills\""
 
 # Case 3:
-# Outside repo root, command should fail to locate template directory.
-echo "[test] fails outside repository root"
+# Existing real .claude/skills directory should be replaced by a symlink.
+echo "[test] replaces legacy .claude/skills directory with symlink"
 home3="$TMP_DIR/home3"
-mkdir -p "$home3/.autopilot"
+mkdir -p "$home3/.autopilot/.claude/skills/legacy-skill"
+echo "legacy" >"$home3/.autopilot/.claude/skills/legacy-skill/SKILL.md"
+stdout3="$TMP_DIR/stdout3.txt"
 stderr3="$TMP_DIR/stderr3.txt"
 set +e
-(cd "$TMP_DIR" && HOME="$home3" "$AP_BIN" update 2>"$stderr3")
+(cd "$ROOT_DIR" && HOME="$home3" "$AP_BIN" update >"$stdout3" 2>"$stderr3")
 status3=$?
 set -e
-if [[ "$status3" -eq 0 ]]; then
+if [[ "$status3" -ne 0 ]]; then
+  echo "assert failed: expected ap update to migrate legacy .claude/skills directory" >&2
+  cat "$stderr3" >&2
+  exit 1
+fi
+assert_exists "$home3/.autopilot/skills/ap-self-recognition/SKILL.md"
+assert_symlink_target "$home3/.autopilot/.claude/skills" "../skills"
+
+# Case 4:
+# Outside repo root, command should fail to locate template directory.
+echo "[test] fails outside repository root"
+home4="$TMP_DIR/home4"
+mkdir -p "$home4/.autopilot"
+stderr4="$TMP_DIR/stderr4.txt"
+set +e
+(cd "$TMP_DIR" && HOME="$home4" "$AP_BIN" update 2>"$stderr4")
+status4=$?
+set -e
+if [[ "$status4" -eq 0 ]]; then
   echo "assert failed: expected ap update to fail outside repository root" >&2
   exit 1
 fi
-assert_file_contains "$stderr3" "run from autopilot repository root"
+assert_file_contains "$stderr4" "run from autopilot repository root"
 
 echo "all tests passed"

@@ -40,8 +40,14 @@ It also creates `$HOME/.autopilot/projects`.
 It also creates Claude Code project skills in:
 
 ```text
-$HOME/.autopilot/.claude/skills/self-recognition
-$HOME/.autopilot/.claude/skills/briefing
+$HOME/.autopilot/skills/ap-self-recognition
+$HOME/.autopilot/skills/ap-briefing
+```
+
+and creates this symlink:
+
+```text
+$HOME/.autopilot/.claude/skills -> ../skills
 ```
 
 Run this command from the autopilot repository root.
@@ -189,7 +195,7 @@ ap briefing
 ```
 
 `ap briefing` creates tmux session `autopilot`, starts Claude in `autopilot:colonel`,
-and injects a bootstrap prompt so colonel runs `$self-recognition` first and is ready for `$briefing`.
+and injects a bootstrap prompt so colonel runs `$ap-self-recognition` first and is ready for `$ap-briefing`.
 It then:
 
 - inside tmux: switches to `autopilot:colonel`

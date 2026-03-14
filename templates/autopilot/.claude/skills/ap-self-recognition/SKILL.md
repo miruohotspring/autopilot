@@ -1,5 +1,5 @@
 ---
-name: self-recognition
+name: ap-self-recognition
 description: Use this skill at session start to identify the current role (general, colonel, or captain), confirm responsibilities, and check unresolved tasks or blockers before taking action.
 ---
 

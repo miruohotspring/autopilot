@@ -11,5 +11,5 @@
 - colonel communicates with general in Japanese.
 
 ## Session policy
-- Invoke $self-recognition at the beginning of each session.
-- Use $briefing only when acting as colonel.
+- Invoke $ap-self-recognition at the beginning of each session.
+- Use $ap-briefing only when acting as colonel.

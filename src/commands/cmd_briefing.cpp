@@ -30,8 +30,8 @@ const char* kColonelSystemPrompt =
     "general との会話は常に日本語で行ってください。";
 
 const char* kBriefingBootstrapPrompt =
-    "Run $self-recognition now. "
-    "After self-recognition, be ready to run $briefing and wait for general's instruction. "
+    "Run $ap-self-recognition now. "
+    "After self-recognition, be ready to run $ap-briefing and wait for general's instruction. "
     "When asked for briefing, gather ~/.autopilot/projects/*/dashboard.md and report cross-project "
     "status plus blockers that require general's approval or instruction.";
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "AP Self Recognition"
+  short_description: "Check autopilot role and pending tasks"
+  default_prompt: "Use $ap-self-recognition to identify the active role and pending tasks."
