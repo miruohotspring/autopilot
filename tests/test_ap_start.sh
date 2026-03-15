@@ -293,7 +293,7 @@ if [[ "$status3b" -eq 0 ]]; then
   echo "assert failed: expected AlphaProject to have no runnable task after removing second task" >&2
   exit 1
 fi
-assert_file_contains "$stderr3b" "ap start failed: no runnable task found in TODO.md"
+assert_file_contains "$stderr3b" "ap start failed: no runnable task"
 assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/task-0002.json" "\"present_in_todo\": false"
 
 # Case 4:
@@ -360,7 +360,7 @@ assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/pr
 assert_file_not_contains "$home2/.autopilot/projects/FailureProject/runtime/state/project.json" "\"failed\": 1"
 
 # Case 4c:
-# Blocked tasks should stay open, create alerts when approval is required, and be rerunnable.
+# Blocked tasks should stay open, create alerts when approval is required, and not be rerun automatically.
 echo "[test] records blocked runs and creates alerts"
 blocked_repo="$TMP_DIR/blocked-repo"
 mkdir -p "$blocked_repo"
@@ -387,7 +387,10 @@ fi
 assert_file_contains "$stderr4c" "ap start blocked: production migration approval needed"
 assert_file_contains "$home2/.autopilot/projects/BlockedProject/TODO.md" "- [ ] blocked task"
 assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"status\": \"blocked\""
+assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"approval_required\": true"
 assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"last_error\": \"production migration approval needed\""
+assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"blocker_reason\": \"production migration approval needed\""
+assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"blocker_category\": \"approval_required\""
 assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/project.json" "\"blocked\": 1"
 assert_exists "$home2/.autopilot/projects/BlockedProject/runtime/alerts/alert-0001.json"
 assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/alerts/alert-0001.json" "\"type\": \"approval_required\""
@@ -397,22 +400,21 @@ assert_file_contains "$blocked_events" "\"type\": \"alert.created\""
 assert_file_contains "$blocked_events" "\"type\": \"result.final\""
 assert_file_contains "$blocked_events" "\"final_task_status\": \"blocked\""
 assert_file_contains "$blocked_events" "\"alert_id\": \"alert-0001\""
-blocked_lines_before="$(wc -l <"$blocked_events")"
-sleep 1
-stdout4c_retry="$TMP_DIR/start_stdout4c_retry.txt"
+stderr4c_retry="$TMP_DIR/start_stderr4c_retry.txt"
+set +e
 env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="approval received" \
   FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start BlockedProject >"$stdout4c_retry"
-blocked_lines_after="$(wc -l <"$blocked_events")"
-if (( blocked_lines_after <= blocked_lines_before )); then
-  echo "assert failed: expected blocked project event log to grow append-only" >&2
+  "$AP_BIN" start BlockedProject > /dev/null 2>"$stderr4c_retry"
+status4c_retry=$?
+set -e
+if [[ "$status4c_retry" -eq 0 ]]; then
+  echo "assert failed: expected blocked task to remain non-runnable without manual metadata changes" >&2
   exit 1
 fi
-assert_file_contains "$stdout4c_retry" "completed task: blocked task"
-assert_file_contains "$home2/.autopilot/projects/BlockedProject/TODO.md" "- [x] blocked task"
-assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"status\": \"done\""
-assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"attempt_count\": 2"
-assert_file_contains "$blocked_events" "\"from\": \"blocked\", \"to\": \"in_progress\""
+assert_file_contains "$stderr4c_retry" "ap start failed: no runnable task"
+assert_file_contains "$home2/.autopilot/projects/BlockedProject/TODO.md" "- [ ] blocked task"
+assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"status\": \"blocked\""
+assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"attempt_count\": 1"
 
 
 # Case 5:
@@ -463,7 +465,7 @@ if [[ "$status6" -eq 0 ]]; then
   echo "assert failed: expected no-task project to fail" >&2
   exit 1
 fi
-assert_file_contains "$stderr6" "ap start failed: no runnable task found in TODO.md"
+assert_file_contains "$stderr6" "ap start failed: no runnable task"
 assert_exists "$home2/.autopilot/projects/EmptyProject/runtime/state/project.json"
 assert_exists "$home2/.autopilot/projects/EmptyProject/runtime/state/tasks/task-0001.json"
 assert_exists "$home2/.autopilot/projects/EmptyProject/runtime/events/events.jsonl"
@@ -609,7 +611,7 @@ if [[ "$status11" -eq 0 ]]; then
   echo "assert failed: expected duplicate unfinished titles to fail" >&2
   exit 1
 fi
-assert_file_contains "$stderr11" "ap start failed: duplicate TODO task titles are not supported in Phase 2"
+assert_file_contains "$stderr11" "ap start failed: duplicate TODO task titles are not supported in Phase 4"
 assert_file_contains "$home2/.autopilot/projects/DuplicateProject/runtime/events/events.jsonl" "\"type\": \"todo.sync_conflict\""
 
 # Case 12:
@@ -800,5 +802,545 @@ assert_file_contains "$home2/.autopilot/projects/HistoricalTitleProject/runtime/
 assert_file_contains "$home2/.autopilot/projects/HistoricalTitleProject/runtime/state/tasks/task-0002.json" "\"attempt_count\": 4"
 assert_file_contains "$home2/.autopilot/projects/HistoricalTitleProject/runtime/state/tasks/task-0001.json" "\"present_in_todo\": false"
 assert_file_contains "$home2/.autopilot/projects/HistoricalTitleProject/runtime/state/tasks/task-0002.json" "\"present_in_todo\": false"
+
+# Case 14:
+# Phase 4 selection should honor priority, todo-before-failed, dependencies, approval, and path affinity.
+echo "[test] selects the highest priority runnable task under Phase 4 rules"
+selection_repo_main="$TMP_DIR/selection-main"
+selection_repo_alt="$TMP_DIR/selection-alt"
+mkdir -p "$selection_repo_main" "$selection_repo_alt"
+HOME="$home2" "$AP_BIN" new SelectionProject >/dev/null
+HOME="$home2" "$AP_BIN" add "$selection_repo_main" -n main -p SelectionProject >/dev/null
+HOME="$home2" "$AP_BIN" add "$selection_repo_alt" -n alt -p SelectionProject >/dev/null
+cat >"$home2/.autopilot/projects/SelectionProject/TODO.md" <<'EOF'
+# SelectionProject TODO
+
+- [ ] line priority fallback
+- [ ] high priority selected
+- [ ] failed same priority
+- [ ] dependency gated
+- [ ] approval gated
+- [ ] alt path task
+EOF
+mkdir -p "$home2/.autopilot/projects/SelectionProject/runtime/state/tasks"
+cat >"$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0001.json" <<'EOF'
+{
+  "id": "task-0001",
+  "title": "line priority fallback",
+  "description": null,
+  "status": "todo",
+  "priority": 20,
+  "depends_on": [],
+  "approval_required": false,
+  "related_paths": ["main"],
+  "generated_by": "human.todo",
+  "source_file": "TODO.md",
+  "source_line": 3,
+  "source_text": "- [ ] line priority fallback",
+  "present_in_todo": true,
+  "attempt_count": 0,
+  "latest_run_id": null,
+  "last_error": null,
+  "blocker_reason": null,
+  "blocker_category": null,
+  "created_at": "2026-03-15T00:00:00+09:00",
+  "updated_at": "2026-03-15T00:00:00+09:00"
+}
+EOF
+cat >"$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0002.json" <<'EOF'
+{
+  "id": "task-0002",
+  "title": "high priority selected",
+  "description": null,
+  "status": "todo",
+  "priority": 10,
+  "depends_on": [],
+  "approval_required": false,
+  "related_paths": ["main"],
+  "generated_by": "human.todo",
+  "source_file": "TODO.md",
+  "source_line": 4,
+  "source_text": "- [ ] high priority selected",
+  "present_in_todo": true,
+  "attempt_count": 0,
+  "latest_run_id": null,
+  "last_error": null,
+  "blocker_reason": null,
+  "blocker_category": null,
+  "created_at": "2026-03-15T00:00:00+09:00",
+  "updated_at": "2026-03-15T00:00:00+09:00"
+}
+EOF
+cat >"$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0003.json" <<'EOF'
+{
+  "id": "task-0003",
+  "title": "failed same priority",
+  "description": null,
+  "status": "failed",
+  "priority": 10,
+  "depends_on": [],
+  "approval_required": false,
+  "related_paths": ["main"],
+  "generated_by": "human.todo",
+  "source_file": "TODO.md",
+  "source_line": 5,
+  "source_text": "- [ ] failed same priority",
+  "present_in_todo": true,
+  "attempt_count": 1,
+  "latest_run_id": "run-old-failed",
+  "last_error": "old failure",
+  "blocker_reason": null,
+  "blocker_category": null,
+  "created_at": "2026-03-15T00:00:00+09:00",
+  "updated_at": "2026-03-15T00:00:00+09:00"
+}
+EOF
+cat >"$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0004.json" <<'EOF'
+{
+  "id": "task-0004",
+  "title": "dependency gated",
+  "description": null,
+  "status": "todo",
+  "priority": 1,
+  "depends_on": ["task-0006"],
+  "approval_required": false,
+  "related_paths": ["main"],
+  "generated_by": "human.todo",
+  "source_file": "TODO.md",
+  "source_line": 6,
+  "source_text": "- [ ] dependency gated",
+  "present_in_todo": true,
+  "attempt_count": 0,
+  "latest_run_id": null,
+  "last_error": null,
+  "blocker_reason": null,
+  "blocker_category": null,
+  "created_at": "2026-03-15T00:00:00+09:00",
+  "updated_at": "2026-03-15T00:00:00+09:00"
+}
+EOF
+cat >"$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0005.json" <<'EOF'
+{
+  "id": "task-0005",
+  "title": "approval gated",
+  "description": null,
+  "status": "todo",
+  "priority": 0,
+  "depends_on": [],
+  "approval_required": true,
+  "related_paths": ["main"],
+  "generated_by": "human.todo",
+  "source_file": "TODO.md",
+  "source_line": 7,
+  "source_text": "- [ ] approval gated",
+  "present_in_todo": true,
+  "attempt_count": 0,
+  "latest_run_id": null,
+  "last_error": null,
+  "blocker_reason": null,
+  "blocker_category": null,
+  "created_at": "2026-03-15T00:00:00+09:00",
+  "updated_at": "2026-03-15T00:00:00+09:00"
+}
+EOF
+cat >"$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0006.json" <<'EOF'
+{
+  "id": "task-0006",
+  "title": "alt path task",
+  "description": null,
+  "status": "todo",
+  "priority": 0,
+  "depends_on": [],
+  "approval_required": false,
+  "related_paths": ["alt"],
+  "generated_by": "human.todo",
+  "source_file": "TODO.md",
+  "source_line": 8,
+  "source_text": "- [ ] alt path task",
+  "present_in_todo": true,
+  "attempt_count": 0,
+  "latest_run_id": null,
+  "last_error": null,
+  "blocker_reason": null,
+  "blocker_category": null,
+  "created_at": "2026-03-15T00:00:00+09:00",
+  "updated_at": "2026-03-15T00:00:00+09:00"
+}
+EOF
+stdout14="$TMP_DIR/start_stdout14.txt"
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="phase 4 selection" \
+  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start SelectionProject >"$stdout14"
+selection_run_dir="$(latest_run_dir "$home2/.autopilot/projects/SelectionProject")"
+assert_file_contains "$stdout14" "completed task: high priority selected"
+assert_file_contains "$selection_run_dir/result.json" "\"task_id\": \"task-0002\""
+assert_file_contains "$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0001.json" "\"status\": \"todo\""
+assert_file_contains "$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0002.json" "\"status\": \"done\""
+assert_file_contains "$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0003.json" "\"status\": \"failed\""
+assert_file_contains "$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0004.json" "\"status\": \"todo\""
+assert_file_contains "$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0005.json" "\"approval_required\": true"
+assert_file_contains "$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0006.json" "\"related_paths\": [\"alt\"]"
+
+# Case 15:
+# Title-only sync updates should preserve metadata and emit task.updated.
+echo "[test] preserves metadata on title rename and records task.updated"
+rename_repo="$TMP_DIR/rename-repo"
+mkdir -p "$rename_repo"
+HOME="$home2" "$AP_BIN" new RenameProject >/dev/null
+HOME="$home2" "$AP_BIN" add "$rename_repo" -n main -p RenameProject >/dev/null
+cat >"$home2/.autopilot/projects/RenameProject/TODO.md" <<'EOF'
+# RenameProject TODO
+
+- [x] renamed task
+EOF
+mkdir -p "$home2/.autopilot/projects/RenameProject/runtime/state/tasks"
+cat >"$home2/.autopilot/projects/RenameProject/runtime/state/tasks/task-0001.json" <<'EOF'
+{
+  "id": "task-0001",
+  "title": "old task name",
+  "description": "keep this description",
+  "status": "done",
+  "priority": 7,
+  "depends_on": [],
+  "approval_required": false,
+  "related_paths": ["main"],
+  "generated_by": "human.todo",
+  "source_file": "TODO.md",
+  "source_line": 3,
+  "source_text": "- [x] old task name",
+  "present_in_todo": true,
+  "attempt_count": 1,
+  "latest_run_id": "run-old-name",
+  "last_error": null,
+  "blocker_reason": null,
+  "blocker_category": null,
+  "created_at": "2026-03-15T00:00:00+09:00",
+  "updated_at": "2026-03-15T00:05:00+09:00"
+}
+EOF
+stderr15="$TMP_DIR/start_stderr15.txt"
+set +e
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start RenameProject > /dev/null 2>"$stderr15"
+status15=$?
+set -e
+if [[ "$status15" -eq 0 ]]; then
+  echo "assert failed: expected RenameProject to have no runnable task" >&2
+  exit 1
+fi
+assert_file_contains "$stderr15" "ap start failed: no runnable task"
+assert_file_contains "$home2/.autopilot/projects/RenameProject/runtime/state/tasks/task-0001.json" "\"title\": \"renamed task\""
+assert_file_contains "$home2/.autopilot/projects/RenameProject/runtime/state/tasks/task-0001.json" "\"description\": \"keep this description\""
+assert_file_contains "$home2/.autopilot/projects/RenameProject/runtime/state/tasks/task-0001.json" "\"priority\": 7"
+assert_file_contains "$home2/.autopilot/projects/RenameProject/runtime/events/events.jsonl" "\"type\": \"task.updated\""
+assert_file_contains "$home2/.autopilot/projects/RenameProject/runtime/events/events.jsonl" "\"changed_fields\": [\"title\"]"
+assert_file_contains "$home2/.autopilot/projects/RenameProject/runtime/events/events.jsonl" "\"old task name\""
+assert_file_contains "$home2/.autopilot/projects/RenameProject/runtime/events/events.jsonl" "\"renamed task\""
+
+# Case 16:
+# Lazy migration should backfill Phase 3 task files and project counts should include review_pending and cancelled.
+echo "[test] backfills old task files and persists expanded project counts"
+counts_repo="$TMP_DIR/counts-repo"
+mkdir -p "$counts_repo"
+HOME="$home2" "$AP_BIN" new CountsProject >/dev/null
+HOME="$home2" "$AP_BIN" add "$counts_repo" -n main -p CountsProject >/dev/null
+cat >"$home2/.autopilot/projects/CountsProject/TODO.md" <<'EOF'
+# CountsProject TODO
+
+- [ ] review waiting
+- [ ] cancelled item
+- [x] already done
+EOF
+mkdir -p "$home2/.autopilot/projects/CountsProject/runtime/state/tasks"
+cat >"$home2/.autopilot/projects/CountsProject/runtime/state/tasks/task-0001.json" <<'EOF'
+{
+  "id": "task-0001",
+  "title": "review waiting",
+  "status": "review_pending",
+  "source_file": "TODO.md",
+  "source_line": 3,
+  "source_text": "- [ ] review waiting",
+  "present_in_todo": true,
+  "attempt_count": 1,
+  "latest_run_id": "run-review",
+  "last_error": null,
+  "created_at": "2026-03-15T00:00:00+09:00",
+  "updated_at": "2026-03-15T00:00:00+09:00"
+}
+EOF
+cat >"$home2/.autopilot/projects/CountsProject/runtime/state/tasks/task-0002.json" <<'EOF'
+{
+  "id": "task-0002",
+  "title": "cancelled item",
+  "status": "cancelled",
+  "source_file": "TODO.md",
+  "source_line": 4,
+  "source_text": "- [ ] cancelled item",
+  "present_in_todo": true,
+  "attempt_count": 0,
+  "latest_run_id": null,
+  "last_error": null,
+  "created_at": "2026-03-15T00:00:00+09:00",
+  "updated_at": "2026-03-15T00:00:00+09:00"
+}
+EOF
+cat >"$home2/.autopilot/projects/CountsProject/runtime/state/tasks/task-0003.json" <<'EOF'
+{
+  "id": "task-0003",
+  "title": "already done",
+  "status": "done",
+  "source_file": "TODO.md",
+  "source_line": 5,
+  "source_text": "- [x] already done",
+  "present_in_todo": true,
+  "attempt_count": 1,
+  "latest_run_id": "run-done",
+  "last_error": null,
+  "created_at": "2026-03-15T00:00:00+09:00",
+  "updated_at": "2026-03-15T00:00:00+09:00"
+}
+EOF
+stderr16="$TMP_DIR/start_stderr16.txt"
+set +e
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start CountsProject > /dev/null 2>"$stderr16"
+status16=$?
+set -e
+if [[ "$status16" -eq 0 ]]; then
+  echo "assert failed: expected CountsProject to have no runnable task" >&2
+  exit 1
+fi
+assert_file_contains "$stderr16" "ap start failed: no runnable task"
+assert_file_contains "$home2/.autopilot/projects/CountsProject/runtime/state/project.json" "\"review_pending\": 1"
+assert_file_contains "$home2/.autopilot/projects/CountsProject/runtime/state/project.json" "\"cancelled\": 1"
+assert_file_contains "$home2/.autopilot/projects/CountsProject/runtime/state/project.json" "\"done\": 1"
+assert_file_contains "$home2/.autopilot/projects/CountsProject/runtime/state/tasks/task-0001.json" "\"priority\": 100"
+assert_file_contains "$home2/.autopilot/projects/CountsProject/runtime/state/tasks/task-0001.json" "\"related_paths\": [\"main\"]"
+assert_file_contains "$home2/.autopilot/projects/CountsProject/runtime/state/tasks/task-0001.json" "\"generated_by\": \"human.todo\""
+assert_file_contains "$home2/.autopilot/projects/CountsProject/runtime/state/tasks/task-0001.json" "\"approval_required\": false"
+
+# Case 17:
+# Invalid dependencies should fail before selection.
+echo "[test] rejects invalid task dependencies"
+dependency_repo="$TMP_DIR/dependency-repo"
+mkdir -p "$dependency_repo"
+HOME="$home2" "$AP_BIN" new DependencyProject >/dev/null
+HOME="$home2" "$AP_BIN" add "$dependency_repo" -n main -p DependencyProject >/dev/null
+cat >"$home2/.autopilot/projects/DependencyProject/TODO.md" <<'EOF'
+# DependencyProject TODO
+
+- [ ] invalid dependency task
+EOF
+mkdir -p "$home2/.autopilot/projects/DependencyProject/runtime/state/tasks"
+cat >"$home2/.autopilot/projects/DependencyProject/runtime/state/tasks/task-0001.json" <<'EOF'
+{
+  "id": "task-0001",
+  "title": "invalid dependency task",
+  "description": null,
+  "status": "todo",
+  "priority": 10,
+  "depends_on": ["task-9999"],
+  "approval_required": false,
+  "related_paths": ["main"],
+  "generated_by": "human.todo",
+  "source_file": "TODO.md",
+  "source_line": 3,
+  "source_text": "- [ ] invalid dependency task",
+  "present_in_todo": true,
+  "attempt_count": 0,
+  "latest_run_id": null,
+  "last_error": null,
+  "blocker_reason": null,
+  "blocker_category": null,
+  "created_at": "2026-03-15T00:00:00+09:00",
+  "updated_at": "2026-03-15T00:00:00+09:00"
+}
+EOF
+stderr17="$TMP_DIR/start_stderr17.txt"
+set +e
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start DependencyProject > /dev/null 2>"$stderr17"
+status17=$?
+set -e
+if [[ "$status17" -eq 0 ]]; then
+  echo "assert failed: expected DependencyProject to fail validation" >&2
+  exit 1
+fi
+assert_file_contains "$stderr17" "ap start failed: invalid task dependency: task-0001 -> task-9999"
+
+# Case 18:
+# Invalid related path names should fail before selection.
+echo "[test] rejects invalid related_paths entries"
+path_repo="$TMP_DIR/path-repo"
+mkdir -p "$path_repo"
+HOME="$home2" "$AP_BIN" new PathProject >/dev/null
+HOME="$home2" "$AP_BIN" add "$path_repo" -n main -p PathProject >/dev/null
+cat >"$home2/.autopilot/projects/PathProject/TODO.md" <<'EOF'
+# PathProject TODO
+
+- [ ] bad path task
+EOF
+mkdir -p "$home2/.autopilot/projects/PathProject/runtime/state/tasks"
+cat >"$home2/.autopilot/projects/PathProject/runtime/state/tasks/task-0001.json" <<'EOF'
+{
+  "id": "task-0001",
+  "title": "bad path task",
+  "description": null,
+  "status": "todo",
+  "priority": 10,
+  "depends_on": [],
+  "approval_required": false,
+  "related_paths": ["missing"],
+  "generated_by": "human.todo",
+  "source_file": "TODO.md",
+  "source_line": 3,
+  "source_text": "- [ ] bad path task",
+  "present_in_todo": true,
+  "attempt_count": 0,
+  "latest_run_id": null,
+  "last_error": null,
+  "blocker_reason": null,
+  "blocker_category": null,
+  "created_at": "2026-03-15T00:00:00+09:00",
+  "updated_at": "2026-03-15T00:00:00+09:00"
+}
+EOF
+stderr18="$TMP_DIR/start_stderr18.txt"
+set +e
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start PathProject > /dev/null 2>"$stderr18"
+status18=$?
+set -e
+if [[ "$status18" -eq 0 ]]; then
+  echo "assert failed: expected PathProject to fail validation" >&2
+  exit 1
+fi
+assert_file_contains "$stderr18" "ap start failed: invalid related path in task task-0001"
+
+# Case 19:
+# Reordering TODO entries should not swap task identity or metadata.
+echo "[test] preserves task identity when TODO entries are reordered"
+reorder_repo="$TMP_DIR/reorder-repo"
+mkdir -p "$reorder_repo"
+HOME="$home2" "$AP_BIN" new ReorderProject >/dev/null
+HOME="$home2" "$AP_BIN" add "$reorder_repo" -n main -p ReorderProject >/dev/null
+cat >"$home2/.autopilot/projects/ReorderProject/TODO.md" <<'EOF'
+# ReorderProject TODO
+
+- [ ] task B
+- [ ] task A
+EOF
+mkdir -p "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks"
+cat >"$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0001.json" <<'EOF'
+{
+  "id": "task-0001",
+  "title": "task A",
+  "description": null,
+  "status": "todo",
+  "priority": 100,
+  "depends_on": [],
+  "approval_required": false,
+  "related_paths": ["main"],
+  "generated_by": "human.todo",
+  "source_file": "TODO.md",
+  "source_line": 3,
+  "source_text": "- [ ] task A",
+  "present_in_todo": true,
+  "attempt_count": 0,
+  "latest_run_id": null,
+  "last_error": null,
+  "blocker_reason": null,
+  "blocker_category": null,
+  "created_at": "2026-03-15T00:00:00+09:00",
+  "updated_at": "2026-03-15T00:00:00+09:00"
+}
+EOF
+cat >"$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0002.json" <<'EOF'
+{
+  "id": "task-0002",
+  "title": "task B",
+  "description": null,
+  "status": "todo",
+  "priority": 1,
+  "depends_on": [],
+  "approval_required": false,
+  "related_paths": ["main"],
+  "generated_by": "human.todo",
+  "source_file": "TODO.md",
+  "source_line": 4,
+  "source_text": "- [ ] task B",
+  "present_in_todo": true,
+  "attempt_count": 0,
+  "latest_run_id": null,
+  "last_error": null,
+  "blocker_reason": null,
+  "blocker_category": null,
+  "created_at": "2026-03-15T00:00:00+09:00",
+  "updated_at": "2026-03-15T00:00:00+09:00"
+}
+EOF
+stdout19="$TMP_DIR/start_stdout19.txt"
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="reordered ok" \
+  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start ReorderProject >"$stdout19"
+reorder_run_dir="$(latest_run_dir "$home2/.autopilot/projects/ReorderProject")"
+assert_file_contains "$stdout19" "completed task: task B"
+assert_file_contains "$reorder_run_dir/result.json" "\"task_id\": \"task-0002\""
+assert_file_contains "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0001.json" "\"title\": \"task A\""
+assert_file_contains "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0001.json" "\"priority\": 100"
+assert_file_contains "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0001.json" "\"source_line\": 4"
+assert_file_contains "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0002.json" "\"title\": \"task B\""
+assert_file_contains "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0002.json" "\"priority\": 1"
+assert_file_contains "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0002.json" "\"source_line\": 3"
+
+# Case 20:
+# Malformed metadata should fail instead of silently defaulting.
+echo "[test] rejects malformed task metadata types"
+malformed_repo="$TMP_DIR/malformed-repo"
+mkdir -p "$malformed_repo"
+HOME="$home2" "$AP_BIN" new MalformedMetadataProject >/dev/null
+HOME="$home2" "$AP_BIN" add "$malformed_repo" -n main -p MalformedMetadataProject >/dev/null
+cat >"$home2/.autopilot/projects/MalformedMetadataProject/TODO.md" <<'EOF'
+# MalformedMetadataProject TODO
+
+- [ ] malformed metadata task
+EOF
+mkdir -p "$home2/.autopilot/projects/MalformedMetadataProject/runtime/state/tasks"
+cat >"$home2/.autopilot/projects/MalformedMetadataProject/runtime/state/tasks/task-0001.json" <<'EOF'
+{
+  "id": "task-0001",
+  "title": "malformed metadata task",
+  "description": null,
+  "status": "todo",
+  "priority": "high",
+  "depends_on": [],
+  "approval_required": false,
+  "related_paths": ["main"],
+  "generated_by": "human.todo",
+  "source_file": "TODO.md",
+  "source_line": 3,
+  "source_text": "- [ ] malformed metadata task",
+  "present_in_todo": true,
+  "attempt_count": 0,
+  "latest_run_id": null,
+  "last_error": null,
+  "blocker_reason": null,
+  "blocker_category": null,
+  "created_at": "2026-03-15T00:00:00+09:00",
+  "updated_at": "2026-03-15T00:00:00+09:00"
+}
+EOF
+stderr20="$TMP_DIR/start_stderr20.txt"
+set +e
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start MalformedMetadataProject > /dev/null 2>"$stderr20"
+status20=$?
+set -e
+if [[ "$status20" -eq 0 ]]; then
+  echo "assert failed: expected malformed metadata to fail task-state loading" >&2
+  exit 1
+fi
+assert_file_contains "$stderr20" "ap start failed: failed to read task state:"
+assert_file_contains "$home2/.autopilot/projects/MalformedMetadataProject/runtime/state/tasks/task-0001.json" "\"priority\": \"high\""
 
 echo "all tests passed"

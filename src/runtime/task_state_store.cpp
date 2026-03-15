@@ -32,13 +32,21 @@ void write_text_file(const fs::path& path, const std::string& content) {
   out << content;
 }
 
-TaskState parse_task_state_file(const fs::path& path) {
+TaskState parse_task_state_file(const fs::path& path, const std::string& default_related_path) {
   try {
     const std::string json = read_text_file(path);
     TaskState task;
     task.id = json_read_required_string(json, "id");
     task.title = json_read_required_string(json, "title");
+    task.description = json_read_optional_string(json, "description");
     task.status = json_read_required_string(json, "status");
+    task.priority = static_cast<int>(json_read_optional_integer(json, "priority").value_or(100));
+    task.depends_on = json_read_optional_string_array(json, "depends_on").value_or(
+        std::vector<std::string>{});
+    task.approval_required = json_read_optional_bool(json, "approval_required").value_or(false);
+    task.related_paths = json_read_optional_string_array(json, "related_paths")
+                             .value_or(std::vector<std::string>{default_related_path});
+    task.generated_by = json_read_optional_string(json, "generated_by").value_or("human.todo");
     task.source_file = json_read_required_string(json, "source_file");
     task.source_line = static_cast<std::size_t>(json_read_required_integer(json, "source_line"));
     task.source_text = json_read_required_string(json, "source_text");
@@ -46,6 +54,8 @@ TaskState parse_task_state_file(const fs::path& path) {
     task.attempt_count = static_cast<int>(json_read_required_integer(json, "attempt_count"));
     task.latest_run_id = json_read_optional_string(json, "latest_run_id");
     task.last_error = json_read_optional_string(json, "last_error");
+    task.blocker_reason = json_read_optional_string(json, "blocker_reason");
+    task.blocker_category = json_read_optional_string(json, "blocker_category");
     task.created_at = json_read_required_string(json, "created_at");
     task.updated_at = json_read_required_string(json, "updated_at");
     return task;
@@ -59,7 +69,13 @@ std::string build_task_state_json(const TaskState& task) {
   oss << "{\n";
   oss << "  \"id\": " << json_string(task.id) << ",\n";
   oss << "  \"title\": " << json_string(task.title) << ",\n";
+  oss << "  \"description\": " << json_nullable_string(task.description) << ",\n";
   oss << "  \"status\": " << json_string(task.status) << ",\n";
+  oss << "  \"priority\": " << task.priority << ",\n";
+  oss << "  \"depends_on\": " << json_string_array(task.depends_on) << ",\n";
+  oss << "  \"approval_required\": " << (task.approval_required ? "true" : "false") << ",\n";
+  oss << "  \"related_paths\": " << json_string_array(task.related_paths) << ",\n";
+  oss << "  \"generated_by\": " << json_string(task.generated_by) << ",\n";
   oss << "  \"source_file\": " << json_string(task.source_file) << ",\n";
   oss << "  \"source_line\": " << task.source_line << ",\n";
   oss << "  \"source_text\": " << json_string(task.source_text) << ",\n";
@@ -67,6 +83,8 @@ std::string build_task_state_json(const TaskState& task) {
   oss << "  \"attempt_count\": " << task.attempt_count << ",\n";
   oss << "  \"latest_run_id\": " << json_nullable_string(task.latest_run_id) << ",\n";
   oss << "  \"last_error\": " << json_nullable_string(task.last_error) << ",\n";
+  oss << "  \"blocker_reason\": " << json_nullable_string(task.blocker_reason) << ",\n";
+  oss << "  \"blocker_category\": " << json_nullable_string(task.blocker_category) << ",\n";
   oss << "  \"created_at\": " << json_string(task.created_at) << ",\n";
   oss << "  \"updated_at\": " << json_string(task.updated_at) << "\n";
   oss << "}\n";
@@ -84,9 +102,11 @@ std::string build_project_state_json(const ProjectState& project) {
   oss << "  \"task_counts\": {\n";
   oss << "    \"todo\": " << project.task_counts.todo << ",\n";
   oss << "    \"in_progress\": " << project.task_counts.in_progress << ",\n";
+  oss << "    \"review_pending\": " << project.task_counts.review_pending << ",\n";
+  oss << "    \"blocked\": " << project.task_counts.blocked << ",\n";
   oss << "    \"done\": " << project.task_counts.done << ",\n";
   oss << "    \"failed\": " << project.task_counts.failed << ",\n";
-  oss << "    \"blocked\": " << project.task_counts.blocked << "\n";
+  oss << "    \"cancelled\": " << project.task_counts.cancelled << "\n";
   oss << "  },\n";
   oss << "  \"updated_at\": " << json_string(project.updated_at) << "\n";
   oss << "}\n";
@@ -95,7 +115,7 @@ std::string build_project_state_json(const ProjectState& project) {
 
 } // namespace
 
-std::vector<TaskState> load_task_states(const fs::path& tasks_dir) {
+std::vector<TaskState> load_task_states(const fs::path& tasks_dir, const std::string& default_related_path) {
   std::vector<TaskState> tasks;
   if (!fs::exists(tasks_dir)) {
     return tasks;
@@ -105,7 +125,7 @@ std::vector<TaskState> load_task_states(const fs::path& tasks_dir) {
     if (!entry.is_regular_file() || entry.path().extension() != ".json") {
       continue;
     }
-    tasks.push_back(parse_task_state_file(entry.path()));
+    tasks.push_back(parse_task_state_file(entry.path(), default_related_path));
   }
 
   std::sort(tasks.begin(), tasks.end(), [](const TaskState& lhs, const TaskState& rhs) {
@@ -129,10 +149,14 @@ std::optional<ProjectState> load_project_state(const fs::path& project_file) {
   project.task_counts.todo = static_cast<int>(json_read_required_integer(json, "todo"));
   project.task_counts.in_progress =
       static_cast<int>(json_read_required_integer(json, "in_progress"));
-  project.task_counts.done = static_cast<int>(json_read_required_integer(json, "done"));
-  project.task_counts.failed = static_cast<int>(json_read_required_integer(json, "failed"));
+  project.task_counts.review_pending =
+      static_cast<int>(json_read_optional_integer(json, "review_pending").value_or(0));
   project.task_counts.blocked =
       static_cast<int>(json_read_optional_integer(json, "blocked").value_or(0));
+  project.task_counts.done = static_cast<int>(json_read_required_integer(json, "done"));
+  project.task_counts.failed = static_cast<int>(json_read_required_integer(json, "failed"));
+  project.task_counts.cancelled =
+      static_cast<int>(json_read_optional_integer(json, "cancelled").value_or(0));
   project.updated_at = json_read_required_string(json, "updated_at");
   return project;
 }
@@ -182,12 +206,16 @@ ProjectTaskCounts compute_project_task_counts(const std::vector<TaskState>& task
       ++counts.todo;
     } else if (task.status == "in_progress") {
       ++counts.in_progress;
+    } else if (task.status == "review_pending") {
+      ++counts.review_pending;
+    } else if (task.status == "blocked") {
+      ++counts.blocked;
     } else if (task.status == "done") {
       ++counts.done;
     } else if (task.status == "failed") {
       ++counts.failed;
-    } else if (task.status == "blocked") {
-      ++counts.blocked;
+    } else if (task.status == "cancelled") {
+      ++counts.cancelled;
     }
   }
   return counts;

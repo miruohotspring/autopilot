@@ -19,8 +19,10 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -360,6 +362,8 @@ std::vector<TaskStatusChange> recover_stale_in_progress_tasks(
     changes.push_back(TaskStatusChange{task.id, task.status, "failed"});
     task.status = "failed";
     task.last_error = "previous ap start did not finish cleanly";
+    task.blocker_reason = std::nullopt;
+    task.blocker_category = std::nullopt;
     task.updated_at = recovered_at;
   }
   return changes;
@@ -374,16 +378,149 @@ TaskState* find_task_by_id(std::vector<TaskState>& tasks, const std::string& tas
   return nullptr;
 }
 
-TaskState* select_runnable_task(std::vector<TaskState>& tasks) {
+std::string build_field_change_object_json(
+    const std::vector<TaskFieldChange>& fields,
+    const bool previous_values) {
+  std::ostringstream oss;
+  oss << "{";
+  for (std::size_t i = 0; i < fields.size(); ++i) {
+    if (i > 0) {
+      oss << ", ";
+    }
+    oss << json_string(fields[i].key) << ": "
+        << (previous_values ? fields[i].previous_json : fields[i].current_json);
+  }
+  oss << "}";
+  return oss.str();
+}
+
+void append_task_updated_event(
+    EventLog& event_log,
+    const std::string& project_name,
+    const TaskUpdateChange& change) {
+  std::vector<std::string> changed_fields;
+  for (const TaskFieldChange& field : change.fields) {
+    changed_fields.push_back(field.key);
+  }
+
+  event_log.append(
+      project_name,
+      EventRecord{
+          change.task_id,
+          std::nullopt,
+          "task.updated",
+          "ap.start",
+          {
+              EventPayloadField{"changed_fields", json_string_array(changed_fields)},
+              EventPayloadField{
+                  "previous",
+                  build_field_change_object_json(change.fields, true),
+              },
+              EventPayloadField{
+                  "current",
+                  build_field_change_object_json(change.fields, false),
+              },
+          },
+      });
+}
+
+std::map<std::string, const TaskState*> build_task_index(const std::vector<TaskState>& tasks) {
+  std::map<std::string, const TaskState*> task_index;
+  for (const TaskState& task : tasks) {
+    task_index[task.id] = &task;
+  }
+  return task_index;
+}
+
+void validate_task_state(
+    const std::vector<TaskState>& tasks, const std::set<std::string>& valid_path_names) {
+  const std::map<std::string, const TaskState*> task_index = build_task_index(tasks);
+
+  for (const TaskState& task : tasks) {
+    if (task.related_paths.empty()) {
+      throw std::runtime_error("invalid related path in task " + task.id);
+    }
+    for (const std::string& related_path : task.related_paths) {
+      if (related_path.empty() || valid_path_names.find(related_path) == valid_path_names.end()) {
+        throw std::runtime_error("invalid related path in task " + task.id);
+      }
+    }
+
+    for (const std::string& dependency_id : task.depends_on) {
+      if (dependency_id == task.id) {
+        throw std::runtime_error("invalid task dependency: " + task.id + " -> " + dependency_id);
+      }
+      if (task_index.find(dependency_id) == task_index.end()) {
+        throw std::runtime_error("invalid task dependency: " + task.id + " -> " + dependency_id);
+      }
+    }
+  }
+
+  std::map<std::string, int> visit_state;
+  std::function<void(const TaskState&)> dfs = [&](const TaskState& task) {
+    visit_state[task.id] = 1;
+    for (const std::string& dependency_id : task.depends_on) {
+      const int dependency_state = visit_state[dependency_id];
+      if (dependency_state == 1) {
+        throw std::runtime_error("dependency cycle detected at " + dependency_id);
+      }
+      if (dependency_state == 2) {
+        continue;
+      }
+      dfs(*task_index.at(dependency_id));
+    }
+    visit_state[task.id] = 2;
+  };
+
+  for (const TaskState& task : tasks) {
+    if (visit_state[task.id] == 0) {
+      dfs(task);
+    }
+  }
+}
+
+bool status_is_runnable_candidate(const TaskState& task) {
+  return task.status == "todo" || task.status == "failed";
+}
+
+bool dependencies_are_resolved(
+    const TaskState& task, const std::map<std::string, const TaskState*>& task_index) {
+  for (const std::string& dependency_id : task.depends_on) {
+    if (task_index.at(dependency_id)->status != "done") {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool task_matches_selected_path(const TaskState& task, const std::string& selected_path_name) {
+  return std::find(task.related_paths.begin(), task.related_paths.end(), selected_path_name) !=
+         task.related_paths.end();
+}
+
+int runnable_status_rank(const TaskState& task) {
+  return task.status == "todo" ? 0 : 1;
+}
+
+TaskState* select_runnable_task(std::vector<TaskState>& tasks, const std::string& selected_path_name) {
+  const std::map<std::string, const TaskState*> task_index = build_task_index(tasks);
   TaskState* selected = nullptr;
   for (TaskState& task : tasks) {
-    if (!task.present_in_todo) {
+    if (!task.present_in_todo || !status_is_runnable_candidate(task) || task.approval_required ||
+        !task_matches_selected_path(task, selected_path_name) ||
+        !dependencies_are_resolved(task, task_index)) {
       continue;
     }
-    if (task.status != "todo" && task.status != "failed" && task.status != "blocked") {
-      continue;
-    }
-    if (selected == nullptr || task.source_line < selected->source_line) {
+
+    if (selected == nullptr || task.priority < selected->priority ||
+        (task.priority == selected->priority &&
+         runnable_status_rank(task) < runnable_status_rank(*selected)) ||
+        (task.priority == selected->priority &&
+         runnable_status_rank(task) == runnable_status_rank(*selected) &&
+         task.source_line < selected->source_line) ||
+        (task.priority == selected->priority &&
+         runnable_status_rank(task) == runnable_status_rank(*selected) &&
+         task.source_line == selected->source_line && task.id < selected->id)) {
       selected = &task;
     }
   }
@@ -479,6 +616,8 @@ void finalize_postrun_failure(
   try {
     task.status = "failed";
     task.last_error = failure_reason;
+    task.blocker_reason = std::nullopt;
+    task.blocker_category = std::nullopt;
     task.updated_at = failed_at;
     save_task_state(tasks_dir, task);
     save_project_state(
@@ -531,14 +670,22 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
 
     EventLog event_log(events_file);
     const std::optional<ProjectState> previous_project_state = load_project_state(project_state_file);
-    const std::vector<TaskState> existing_tasks = load_task_states(tasks_dir);
+    const std::vector<ProjectPathEntry> project_paths =
+        load_project_path_entries(projects_file, project_name);
+    std::set<std::string> valid_path_names;
+    for (const ProjectPathEntry& path_entry : project_paths) {
+      valid_path_names.insert(path_entry.name);
+    }
+
+    const std::vector<TaskState> existing_tasks = load_task_states(tasks_dir, selected_path.name);
     const std::string synced_at = current_timestamp_with_offset();
 
     TodoSyncResult sync_result;
     try {
-      sync_result = sync_todo_with_task_state(todo_file, existing_tasks, synced_at);
+      sync_result =
+          sync_todo_with_task_state(todo_file, existing_tasks, synced_at, selected_path.name);
     } catch (const std::runtime_error& e) {
-      if (std::string(e.what()) == "duplicate TODO task titles are not supported in Phase 2") {
+      if (std::string(e.what()) == "duplicate TODO task titles are not supported in Phase 4") {
         event_log.append(
             project_name,
             EventRecord{
@@ -556,6 +703,7 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
 
     const std::vector<TaskStatusChange> recovered_in_progress_changes =
         recover_stale_in_progress_tasks(sync_result.tasks, synced_at);
+    validate_task_state(sync_result.tasks, valid_path_names);
     save_task_states(tasks_dir, sync_result.tasks);
     for (const TaskState& task : sync_result.discovered_tasks) {
       event_log.append(
@@ -570,6 +718,9 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
                   EventPayloadField{"source_line", std::to_string(task.source_line)},
               },
           });
+    }
+    for (const TaskUpdateChange& change : sync_result.task_updates) {
+      append_task_updated_event(event_log, project_name, change);
     }
     for (const TaskStatusChange& change : sync_result.status_changes) {
       TaskState* changed_task = find_task_by_id(sync_result.tasks, change.task_id);
@@ -610,9 +761,9 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
         synced_at);
     save_project_state(project_state_file, project_state);
 
-    TaskState* selected_task = select_runnable_task(sync_result.tasks);
+    TaskState* selected_task = select_runnable_task(sync_result.tasks, selected_path.name);
     if (selected_task == nullptr) {
-      std::cerr << "ap start failed: no runnable task found in TODO.md\n";
+      std::cerr << "ap start failed: no runnable task\n";
       return 1;
     }
 
@@ -634,6 +785,8 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
     ++selected_task->attempt_count;
     selected_task->latest_run_id = run_id;
     selected_task->last_error = std::nullopt;
+    selected_task->blocker_reason = std::nullopt;
+    selected_task->blocker_category = std::nullopt;
     selected_task->updated_at = started_at;
     save_task_state(tasks_dir, *selected_task);
 
@@ -766,12 +919,21 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
       selected_task->updated_at = ended_at;
       if (classification.final_task_status == "done") {
         selected_task->last_error = std::nullopt;
+        selected_task->blocker_reason = std::nullopt;
+        selected_task->blocker_category = std::nullopt;
       } else if (blocked) {
         selected_task->last_error = classification.blocker_reason;
+        selected_task->blocker_reason = classification.blocker_reason;
+        selected_task->blocker_category = classification.blocker_category;
+        if (classification.approval_required) {
+          selected_task->approval_required = true;
+        }
       } else {
         selected_task->last_error =
             std::optional<std::string>("agent exited with status " +
                                        std::to_string(launch_result.exit_code));
+        selected_task->blocker_reason = std::nullopt;
+        selected_task->blocker_category = std::nullopt;
       }
       save_task_state(tasks_dir, *selected_task);
 
