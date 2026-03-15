@@ -11,7 +11,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-const std::regex kTodoLineRe(R"(^- \[ \] (.+)$)");
+const std::regex kTodoLineRe(R"(^- \[( |x)\] (.+)$)");
 
 std::vector<std::string> read_all_lines(const fs::path& path) {
   std::ifstream in(path);
@@ -40,12 +40,29 @@ void write_all_lines(const fs::path& path, const std::vector<std::string>& lines
 
 } // namespace
 
-std::optional<TodoTaskSelection> select_first_todo_task(const fs::path& todo_file) {
+std::vector<TodoTaskSelection> list_todo_tasks(const fs::path& todo_file) {
   const std::vector<std::string> lines = read_all_lines(todo_file);
+  std::vector<TodoTaskSelection> tasks;
   for (std::size_t i = 0; i < lines.size(); ++i) {
     std::smatch match;
-    if (std::regex_match(lines[i], match, kTodoLineRe)) {
-      return TodoTaskSelection{match[1].str(), i + 1, lines[i]};
+    if (!std::regex_match(lines[i], match, kTodoLineRe)) {
+      continue;
+    }
+    tasks.push_back(TodoTaskSelection{
+        match[2].str(),
+        i + 1,
+        lines[i],
+        match[1].str() == "x",
+    });
+  }
+  return tasks;
+}
+
+std::optional<TodoTaskSelection> select_first_todo_task(const fs::path& todo_file) {
+  const std::vector<TodoTaskSelection> tasks = list_todo_tasks(todo_file);
+  for (const TodoTaskSelection& task : tasks) {
+    if (!task.completed) {
+      return task;
     }
   }
   return std::nullopt;

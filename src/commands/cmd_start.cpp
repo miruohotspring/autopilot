@@ -5,9 +5,15 @@
 #include "autopilot/projects/project_paths.hpp"
 #include "autopilot/projects/project_store.hpp"
 #include "autopilot/projects/todo_task_selector.hpp"
+#include "autopilot/projects/todo_task_sync.hpp"
+#include "autopilot/runtime/event_log.hpp"
+#include "autopilot/runtime/json_utils.hpp"
+#include "autopilot/runtime/task_state_store.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -18,7 +24,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <ctime>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -41,44 +47,6 @@ std::string shell_quote(const std::string& s) {
   }
   quoted.push_back('\'');
   return quoted;
-}
-
-std::string json_escape(const std::string& input) {
-  std::string out;
-  out.reserve(input.size());
-  for (char ch : input) {
-    switch (ch) {
-      case '\\':
-        out += "\\\\";
-        break;
-      case '"':
-        out += "\\\"";
-        break;
-      case '\b':
-        out += "\\b";
-        break;
-      case '\f':
-        out += "\\f";
-        break;
-      case '\n':
-        out += "\\n";
-        break;
-      case '\r':
-        out += "\\r";
-        break;
-      case '\t':
-        out += "\\t";
-        break;
-      default:
-        out.push_back(ch);
-        break;
-    }
-  }
-  return out;
-}
-
-std::string json_string(const std::string& input) {
-  return "\"" + json_escape(input) + "\"";
 }
 
 std::string current_timestamp_with_offset() {
@@ -115,17 +83,28 @@ std::string current_run_id(const std::size_t source_line) {
   return oss.str();
 }
 
+std::string allocate_run_id(const fs::path& runs_dir, const std::size_t source_line) {
+  for (int attempt = 0; attempt < 200; ++attempt) {
+    const std::string run_id = current_run_id(source_line);
+    if (!fs::exists(runs_dir / run_id)) {
+      return run_id;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  throw std::runtime_error("failed to allocate unique run id");
+}
+
 std::string build_prompt(
     const std::string& project_name,
     const SelectedProjectPath& selected_path,
-    const TodoTaskSelection& task) {
+    const TaskState& task) {
   std::ostringstream oss;
   oss << "You are working on autopilot project '" << project_name << "'.\n";
   oss << "Working directory: " << selected_path.path.string() << "\n";
   oss << "Managed path name: " << selected_path.name << "\n";
   oss << "Selected task: " << task.title << "\n";
   oss << "Source line in TODO.md: " << task.source_line << "\n";
-  oss << "Original TODO line: " << task.original_line_text << "\n";
+  oss << "Original TODO line: " << task.source_text << "\n";
   oss << "Implement the selected task if possible.\n";
   oss << "You may inspect and edit files in the working directory.\n";
   oss << "At the end, print a short summary of what you changed.\n";
@@ -316,9 +295,10 @@ std::string resolve_project_name(const std::optional<std::string>& maybe_project
 std::string build_meta_json(
     const std::string& run_id,
     const std::string& project_name,
-    const TodoTaskSelection& task,
+    const TaskState& task,
     const SelectedProjectPath& selected_path,
     const std::string& agent_name,
+    const int attempt_number,
     const std::string& status,
     const std::string& started_at,
     const std::optional<std::string>& ended_at,
@@ -326,23 +306,19 @@ std::string build_meta_json(
   std::ostringstream oss;
   oss << "{\n";
   oss << "  \"run_id\": " << json_string(run_id) << ",\n";
+  oss << "  \"task_id\": " << json_string(task.id) << ",\n";
+  oss << "  \"attempt_number\": " << attempt_number << ",\n";
   oss << "  \"project\": " << json_string(project_name) << ",\n";
   oss << "  \"task_title\": " << json_string(task.title) << ",\n";
-  oss << "  \"task_source_file\": \"TODO.md\",\n";
+  oss << "  \"task_source_file\": " << json_string(task.source_file) << ",\n";
   oss << "  \"task_source_line\": " << task.source_line << ",\n";
-  oss << "  \"task_original_line\": " << json_string(task.original_line_text) << ",\n";
+  oss << "  \"task_original_line\": " << json_string(task.source_text) << ",\n";
   oss << "  \"path_name\": " << json_string(selected_path.name) << ",\n";
   oss << "  \"working_directory\": " << json_string(selected_path.path.string()) << ",\n";
   oss << "  \"agent\": " << json_string(agent_name) << ",\n";
   oss << "  \"status\": " << json_string(status) << ",\n";
   oss << "  \"started_at\": " << json_string(started_at) << ",\n";
-  oss << "  \"ended_at\": ";
-  if (ended_at.has_value()) {
-    oss << json_string(*ended_at);
-  } else {
-    oss << "null";
-  }
-  oss << ",\n";
+  oss << "  \"ended_at\": " << json_nullable_string(ended_at) << ",\n";
   oss << "  \"exit_code\": ";
   if (exit_code.has_value()) {
     oss << *exit_code;
@@ -355,25 +331,149 @@ std::string build_meta_json(
 
 std::string build_result_json(
     const std::string& run_id,
+    const TaskState& task,
+    const int attempt_number,
     const std::string& status,
     const int exit_code,
     const std::string& started_at,
     const std::string& ended_at,
     const long long duration_ms,
     const bool todo_update_applied,
+    const std::string& final_task_status,
     const std::string& summary_excerpt) {
   std::ostringstream oss;
   oss << "{\n";
   oss << "  \"run_id\": " << json_string(run_id) << ",\n";
+  oss << "  \"task_id\": " << json_string(task.id) << ",\n";
+  oss << "  \"attempt_number\": " << attempt_number << ",\n";
   oss << "  \"status\": " << json_string(status) << ",\n";
   oss << "  \"exit_code\": " << exit_code << ",\n";
   oss << "  \"started_at\": " << json_string(started_at) << ",\n";
   oss << "  \"ended_at\": " << json_string(ended_at) << ",\n";
   oss << "  \"duration_ms\": " << duration_ms << ",\n";
+  oss << "  \"final_task_status\": " << json_string(final_task_status) << ",\n";
   oss << "  \"todo_update_applied\": " << (todo_update_applied ? "true" : "false") << ",\n";
   oss << "  \"summary_excerpt\": " << json_string(summary_excerpt) << "\n";
   oss << "}\n";
   return oss.str();
+}
+
+std::vector<TaskStatusChange> recover_stale_in_progress_tasks(
+    std::vector<TaskState>& tasks, const std::string& recovered_at) {
+  std::vector<TaskStatusChange> changes;
+  for (TaskState& task : tasks) {
+    if (task.status != "in_progress") {
+      continue;
+    }
+    changes.push_back(TaskStatusChange{task.id, task.status, "failed"});
+    task.status = "failed";
+    task.last_error = "previous ap start did not finish cleanly";
+    task.updated_at = recovered_at;
+  }
+  return changes;
+}
+
+TaskState* find_task_by_id(std::vector<TaskState>& tasks, const std::string& task_id) {
+  for (TaskState& task : tasks) {
+    if (task.id == task_id) {
+      return &task;
+    }
+  }
+  return nullptr;
+}
+
+TaskState* select_runnable_task(std::vector<TaskState>& tasks) {
+  TaskState* selected = nullptr;
+  for (TaskState& task : tasks) {
+    if (!task.present_in_todo) {
+      continue;
+    }
+    if (task.status != "todo" && task.status != "failed") {
+      continue;
+    }
+    if (selected == nullptr || task.source_line < selected->source_line) {
+      selected = &task;
+    }
+  }
+  return selected;
+}
+
+ProjectState build_project_state(
+    const std::string& project_name,
+    const std::vector<TaskState>& tasks,
+    const std::optional<ProjectState>& previous_state,
+    const std::optional<std::string>& active_task_id,
+    const std::optional<std::string>& last_run_id,
+    const std::optional<std::string>& last_run_at,
+    const std::string& updated_at) {
+  ProjectState project = previous_state.value_or(ProjectState{});
+  project.project = project_name;
+  project.status = "active";
+  project.active_task_id = active_task_id;
+  project.last_run_id = last_run_id.has_value()
+                            ? last_run_id
+                            : (previous_state.has_value() ? previous_state->last_run_id : std::nullopt);
+  project.last_run_at = last_run_at.has_value()
+                            ? last_run_at
+                            : (previous_state.has_value() ? previous_state->last_run_at : std::nullopt);
+  project.task_counts = compute_project_task_counts(tasks);
+  project.updated_at = updated_at;
+  return project;
+}
+
+void rollback_prelaunch_task_update(
+    const fs::path& tasks_dir,
+    const fs::path& project_state_file,
+    const std::string& project_name,
+    std::vector<TaskState>& tasks,
+    TaskState& task,
+    const TaskState& previous_task,
+    const std::optional<ProjectState>& previous_project_state,
+    const std::string& rollback_at) {
+  try {
+    task = previous_task;
+    save_task_state(tasks_dir, task);
+    save_project_state(
+        project_state_file,
+        build_project_state(
+            project_name,
+            tasks,
+            previous_project_state,
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            rollback_at));
+  } catch (const std::exception&) {
+  }
+}
+
+void append_status_changed_event(
+    EventLog& event_log,
+    const std::string& project_name,
+    const TaskState& task,
+    const std::optional<std::string>& run_id,
+    const std::string& from_status,
+    const std::string& to_status) {
+  event_log.append(
+      project_name,
+      EventRecord{
+          task.id,
+          run_id,
+          "task.status_changed",
+          "ap.start",
+          {
+              EventPayloadField{"from", json_string(from_status)},
+              EventPayloadField{"to", json_string(to_status)},
+          },
+      });
+}
+
+std::string completed_todo_line(const std::string& line) {
+  std::string out = line;
+  if (out.rfind("- [ ] ", 0) == 0) {
+    out.replace(3, 1, "x");
+  }
+  return out;
 }
 
 } // namespace
@@ -381,26 +481,113 @@ std::string build_result_json(
 int cmd_start(const std::optional<std::string>& maybe_project_name) {
   try {
     const std::string project_name = resolve_project_name(maybe_project_name);
+    const fs::path project_dir = project_dir_path(project_name);
     const fs::path projects_file = projects_file_path();
     const SelectedProjectPath selected_path = resolve_project_path(projects_file, project_name);
-    const fs::path todo_file = project_dir_path(project_name) / "TODO.md";
+    const fs::path todo_file = project_dir / "TODO.md";
     if (!fs::exists(todo_file)) {
       std::cerr << "ap start failed: TODO.md not found\n";
       return 1;
     }
 
-    const std::optional<TodoTaskSelection> maybe_task = select_first_todo_task(todo_file);
-    if (!maybe_task.has_value()) {
+    const fs::path runtime_dir = project_dir / "runtime";
+    const fs::path runs_dir = runtime_dir / "runs";
+    const fs::path events_file = runtime_dir / "events" / "events.jsonl";
+    const fs::path state_dir = runtime_dir / "state";
+    const fs::path project_state_file = state_dir / "project.json";
+    const fs::path tasks_dir = state_dir / "tasks";
+    const fs::path last_run_file = runtime_dir / "last_run.json";
+    fs::create_directories(runs_dir);
+    fs::create_directories(tasks_dir);
+    fs::create_directories(events_file.parent_path());
+
+    EventLog event_log(events_file);
+    const std::optional<ProjectState> previous_project_state = load_project_state(project_state_file);
+    const std::vector<TaskState> existing_tasks = load_task_states(tasks_dir);
+    const std::string synced_at = current_timestamp_with_offset();
+
+    TodoSyncResult sync_result;
+    try {
+      sync_result = sync_todo_with_task_state(todo_file, existing_tasks, synced_at);
+    } catch (const std::runtime_error& e) {
+      if (std::string(e.what()) == "duplicate TODO task titles are not supported in Phase 2") {
+        event_log.append(
+            project_name,
+            EventRecord{
+                std::nullopt,
+                std::nullopt,
+                "todo.sync_conflict",
+                "ap.start",
+                {EventPayloadField{"message", json_string(e.what())}},
+            });
+        std::cerr << "ap start failed: " << e.what() << '\n';
+        return 1;
+      }
+      throw;
+    }
+
+    const std::vector<TaskStatusChange> recovered_in_progress_changes =
+        recover_stale_in_progress_tasks(sync_result.tasks, synced_at);
+    save_task_states(tasks_dir, sync_result.tasks);
+    for (const TaskState& task : sync_result.discovered_tasks) {
+      event_log.append(
+          project_name,
+          EventRecord{
+              task.id,
+              std::nullopt,
+              "task.discovered",
+              "ap.start",
+              {
+                  EventPayloadField{"title", json_string(task.title)},
+                  EventPayloadField{"source_line", std::to_string(task.source_line)},
+              },
+          });
+    }
+    for (const TaskStatusChange& change : sync_result.status_changes) {
+      TaskState* changed_task = find_task_by_id(sync_result.tasks, change.task_id);
+      if (changed_task == nullptr) {
+        continue;
+      }
+      append_status_changed_event(
+          event_log,
+          project_name,
+          *changed_task,
+          std::nullopt,
+          change.from_status,
+          change.to_status);
+    }
+    for (const TaskStatusChange& change : recovered_in_progress_changes) {
+      TaskState* changed_task = find_task_by_id(sync_result.tasks, change.task_id);
+      if (changed_task == nullptr) {
+        continue;
+      }
+      append_status_changed_event(
+          event_log,
+          project_name,
+          *changed_task,
+          std::nullopt,
+          change.from_status,
+          change.to_status);
+    }
+
+    ProjectState project_state = build_project_state(
+        project_name,
+        sync_result.tasks,
+        previous_project_state,
+        std::nullopt,
+        std::nullopt,
+        std::nullopt,
+        synced_at);
+    save_project_state(project_state_file, project_state);
+
+    TaskState* selected_task = select_runnable_task(sync_result.tasks);
+    if (selected_task == nullptr) {
       std::cerr << "ap start failed: no runnable task found in TODO.md\n";
       return 1;
     }
 
     const std::string agent_name = resolve_agent_name();
-
-    const TodoTaskSelection task = *maybe_task;
-    const std::string run_id = current_run_id(task.source_line);
-    const fs::path runtime_dir = project_dir_path(project_name) / "runtime";
-    const fs::path runs_dir = runtime_dir / "runs";
+    const std::string run_id = allocate_run_id(runs_dir, selected_task->source_line);
     const fs::path run_dir = runs_dir / run_id;
     fs::create_directories(run_dir);
 
@@ -409,40 +596,112 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
     const fs::path stdout_file = run_dir / "stdout.log";
     const fs::path stderr_file = run_dir / "stderr.log";
     const fs::path result_file = run_dir / "result.json";
-    const fs::path last_run_file = runtime_dir / "last_run.json";
 
     const std::string started_at = current_timestamp_with_offset();
-    const std::string prompt = build_prompt(project_name, selected_path, task);
-    write_text_file(prompt_file, prompt);
-    write_text_file(
-        meta_file,
-        build_meta_json(
-            run_id,
-            project_name,
-            task,
-            selected_path,
-            agent_name,
-            "running",
-            started_at,
-            std::nullopt,
-            std::nullopt));
+    const TaskState previous_task_state = *selected_task;
+    const std::string previous_status = selected_task->status;
+    selected_task->status = "in_progress";
+    ++selected_task->attempt_count;
+    selected_task->latest_run_id = run_id;
+    selected_task->last_error = std::nullopt;
+    selected_task->updated_at = started_at;
+    save_task_state(tasks_dir, *selected_task);
 
-    const auto started_clock = std::chrono::steady_clock::now();
-    const AgentLaunchResult launch_result = tmux_is_available()
-                                                ? run_agent_in_tmux(
-                                                      project_name,
-                                                      run_id,
-                                                      agent_name,
-                                                      prompt,
-                                                      selected_path.path,
-                                                      stdout_file,
-                                                      stderr_file)
-                                                : run_agent(
-                                                      agent_name,
-                                                      prompt,
-                                                      selected_path.path,
-                                                      stdout_file,
-                                                      stderr_file);
+    project_state = build_project_state(
+        project_name,
+        sync_result.tasks,
+        previous_project_state,
+        selected_task->id,
+        std::nullopt,
+        std::nullopt,
+        started_at);
+    AgentLaunchResult launch_result{agent_name, 1};
+    bool launch_started = false;
+    const std::string prompt = build_prompt(project_name, selected_path, *selected_task);
+    std::chrono::steady_clock::time_point started_clock;
+    try {
+      save_project_state(project_state_file, project_state);
+
+      event_log.append(
+          project_name,
+          EventRecord{
+              selected_task->id,
+              run_id,
+              "task.selected",
+              "ap.start",
+              {
+                  EventPayloadField{"title", json_string(selected_task->title)},
+                  EventPayloadField{"source_line", std::to_string(selected_task->source_line)},
+                  EventPayloadField{
+                      "attempt_number",
+                      std::to_string(selected_task->attempt_count),
+                  },
+              },
+          });
+      append_status_changed_event(
+          event_log, project_name, *selected_task, run_id, previous_status, selected_task->status);
+
+      write_text_file(prompt_file, prompt);
+      write_text_file(
+          meta_file,
+          build_meta_json(
+              run_id,
+              project_name,
+              *selected_task,
+              selected_path,
+              agent_name,
+              selected_task->attempt_count,
+              "running",
+              started_at,
+              std::nullopt,
+              std::nullopt));
+      event_log.append(
+          project_name,
+          EventRecord{
+              selected_task->id,
+              run_id,
+              "run.started",
+              "ap.start",
+              {
+                  EventPayloadField{"agent", json_string(agent_name)},
+                  EventPayloadField{
+                      "attempt_number",
+                      std::to_string(selected_task->attempt_count),
+                  },
+              },
+          });
+
+      started_clock = std::chrono::steady_clock::now();
+      launch_started = true;
+      launch_result = tmux_is_available()
+                          ? run_agent_in_tmux(
+                                project_name,
+                                run_id,
+                                agent_name,
+                                prompt,
+                                selected_path.path,
+                                stdout_file,
+                                stderr_file)
+                          : run_agent(
+                                agent_name,
+                                prompt,
+                                selected_path.path,
+                                stdout_file,
+                                stderr_file);
+    } catch (const std::exception&) {
+      if (!launch_started) {
+        rollback_prelaunch_task_update(
+            tasks_dir,
+            project_state_file,
+            project_name,
+            sync_result.tasks,
+            *selected_task,
+            previous_task_state,
+            previous_project_state,
+            current_timestamp_with_offset());
+      }
+      throw;
+    }
     const auto ended_clock = std::chrono::steady_clock::now();
 
     const std::string ended_at = current_timestamp_with_offset();
@@ -450,36 +709,110 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
                                      ended_clock - started_clock)
                                      .count();
     const bool succeeded = launch_result.exit_code == 0;
-    const bool todo_update_applied = succeeded && mark_todo_task_done(todo_file, task);
+    bool todo_update_applied = false;
+    if (succeeded) {
+      todo_update_applied = mark_todo_task_done(
+          todo_file,
+          TodoTaskSelection{
+              selected_task->title,
+              selected_task->source_line,
+              selected_task->source_text,
+              false,
+          });
+      if (!todo_update_applied) {
+        event_log.append(
+            project_name,
+            EventRecord{
+                selected_task->id,
+                run_id,
+                "todo.sync_conflict",
+                "ap.start",
+                {EventPayloadField{"message", json_string("failed to update TODO.md after run")}},
+            });
+      }
+    }
+
     const std::string summary_excerpt = read_last_non_empty_line(stdout_file);
-    const std::string status = succeeded ? "succeeded" : "failed";
+    const std::string run_status = succeeded ? "succeeded" : "failed";
+    const std::string final_task_status = succeeded ? "done" : "failed";
+    const std::string pre_final_status = selected_task->status;
+    selected_task->status = final_task_status;
+    selected_task->updated_at = ended_at;
+    selected_task->last_error = succeeded
+                                    ? std::nullopt
+                                    : std::optional<std::string>(
+                                          "agent exited with status " +
+                                          std::to_string(launch_result.exit_code));
+    if (todo_update_applied) {
+      selected_task->source_text = completed_todo_line(selected_task->source_text);
+    }
+    save_task_state(tasks_dir, *selected_task);
 
-    const std::string meta_json = build_meta_json(
-        run_id,
-        project_name,
-        task,
-        selected_path,
-        launch_result.agent_name,
-        status,
-        started_at,
-        ended_at,
-        launch_result.exit_code);
-    write_text_file(meta_file, meta_json);
-
+    write_text_file(
+        meta_file,
+        build_meta_json(
+            run_id,
+            project_name,
+            *selected_task,
+            selected_path,
+            launch_result.agent_name,
+            selected_task->attempt_count,
+            run_status,
+            started_at,
+            ended_at,
+            launch_result.exit_code));
     const std::string result_json = build_result_json(
         run_id,
-        status,
+        *selected_task,
+        selected_task->attempt_count,
+        run_status,
         launch_result.exit_code,
         started_at,
         ended_at,
         duration_ms,
         todo_update_applied,
+        final_task_status,
         summary_excerpt);
     write_text_file(result_file, result_json);
     write_text_file(last_run_file, result_json);
 
+    append_status_changed_event(
+        event_log,
+        project_name,
+        *selected_task,
+        run_id,
+        pre_final_status,
+        selected_task->status);
+    event_log.append(
+        project_name,
+        EventRecord{
+            selected_task->id,
+            run_id,
+            "run.finished",
+            "ap.start",
+            {
+                EventPayloadField{"status", json_string(run_status)},
+                EventPayloadField{"exit_code", std::to_string(launch_result.exit_code)},
+                EventPayloadField{
+                    "todo_update_applied",
+                    todo_update_applied ? "true" : "false",
+                },
+                EventPayloadField{"final_task_status", json_string(final_task_status)},
+            },
+        });
+
+    project_state = build_project_state(
+        project_name,
+        sync_result.tasks,
+        previous_project_state,
+        std::nullopt,
+        run_id,
+        ended_at,
+        ended_at);
+    save_project_state(project_state_file, project_state);
+
     if (succeeded) {
-      std::cout << "completed task: " << task.title << '\n';
+      std::cout << "completed task: " << selected_task->title << '\n';
       return 0;
     }
 
