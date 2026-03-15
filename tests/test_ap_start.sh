@@ -63,11 +63,84 @@ write_fake_agent() {
   cat >"$dir/$name" <<'EOF'
 #!/bin/bash
 set -euo pipefail
+printf '%s\n' "argv:$*"
 printf '%s\n' "${FAKE_AGENT_NAME:-agent}:${FAKE_AGENT_STDOUT:-fake agent completed}"
 printf '%s\n' "${FAKE_AGENT_NAME:-agent}:${FAKE_AGENT_STDERR:-}" >&2
 exit "${FAKE_AGENT_EXIT_CODE:-0}"
 EOF
   chmod +x "$dir/$name"
+}
+
+write_fake_tmux() {
+  local dir="$1"
+  cat >"$dir/tmux" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+STATE_DIR="${FAKE_TMUX_STATE_DIR:?}"
+LOG_FILE="$STATE_DIR/tmux.log"
+SESSION_FILE="$STATE_DIR/autopilot.session"
+
+mkdir -p "$STATE_DIR/channels"
+
+cmd="${1:-}"
+shift || true
+printf "%s %s\n" "$cmd" "$*" >>"$LOG_FILE"
+
+case "$cmd" in
+  -V)
+    echo "tmux 3.2a"
+    ;;
+  has-session)
+    [[ -f "$SESSION_FILE" ]]
+    ;;
+  new-session)
+    touch "$SESSION_FILE"
+    command="${*: -1}"
+    if [[ "$command" != -* ]]; then
+      bash -lc "$command" >/dev/null 2>&1 &
+    fi
+    ;;
+  new-window)
+    touch "$SESSION_FILE"
+    command="${*: -1}"
+    if [[ "$command" != -* ]]; then
+      bash -lc "$command" >/dev/null 2>&1 &
+    fi
+    ;;
+  wait-for)
+    if [[ "${1:-}" == "-S" ]]; then
+      touch "$STATE_DIR/channels/$2"
+      exit 0
+    fi
+    channel="${1:?}"
+    for _ in $(seq 1 500); do
+      if [[ -f "$STATE_DIR/channels/$channel" ]]; then
+        exit 0
+      fi
+      sleep 0.01
+    done
+    exit 1
+    ;;
+  attach-session)
+    for _ in $(seq 1 500); do
+      if compgen -G "$STATE_DIR/channels/*" >/dev/null; then
+        exit 0
+      fi
+      sleep 0.01
+    done
+    exit 1
+    ;;
+  switch-client|kill-window)
+    exit 0
+    ;;
+  *)
+    echo "unexpected tmux command: $cmd" >&2
+    exit 99
+    ;;
+esac
+EOF
+  chmod +x "$dir/tmux"
 }
 
 latest_run_dir() {
@@ -97,6 +170,9 @@ mkdir -p "$home2/.autopilot"
 fake_bin="$TMP_DIR/fake-bin"
 write_fake_agent "$fake_bin" claude
 write_fake_agent "$fake_bin" codex
+write_fake_tmux "$fake_bin"
+tmux_state="$TMP_DIR/tmux-state"
+mkdir -p "$tmux_state"
 project_repo_a="$TMP_DIR/repo-a"
 project_repo_b="$TMP_DIR/repo-b"
 mkdir -p "$project_repo_a" "$project_repo_b"
@@ -122,13 +198,15 @@ EOF
 # Interactive project selection should work when project name is omitted.
 echo "[test] supports interactive project selection"
 stdout2="$TMP_DIR/start_stdout2.txt"
-printf '2\n' | env HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="beta summary" \
-  FAKE_AGENT_NAME="claude" \
+printf '2\n' | env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="beta summary" \
+  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
   "$AP_BIN" start >"$stdout2"
 assert_file_contains "$stdout2" "Select project to start:"
 assert_file_contains "$stdout2" "Enter number to start:"
 assert_file_contains "$stdout2" "completed task: beta task"
 assert_file_contains "$home2/.autopilot/projects/BetaProject/TODO.md" "- [x] beta task"
+assert_file_contains "$tmux_state/tmux.log" "new-session -d -s autopilot -n start-BetaProject-"
+assert_file_contains "$tmux_state/tmux.log" "attach-session -t autopilot:start-BetaProject-"
 
 # Reset BetaProject TODO because project ordering is lexical and project output text checks are simpler below.
 cat >"$home2/.autopilot/projects/BetaProject/TODO.md" <<'EOF'
@@ -141,8 +219,8 @@ EOF
 # Success should create runtime artifacts and mark the first open task done.
 echo "[test] creates runtime artifacts and marks first task done on success"
 stdout3="$TMP_DIR/start_stdout3.txt"
-HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="implemented first task" \
-  FAKE_AGENT_NAME="claude" \
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="implemented first task" \
+  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
   "$AP_BIN" start AlphaProject >"$stdout3"
 assert_file_contains "$stdout3" "completed task: first task"
 assert_file_contains "$home2/.autopilot/projects/AlphaProject/TODO.md" "- [x] first task"
@@ -156,7 +234,10 @@ assert_exists "$alpha_run_dir/result.json"
 assert_file_contains "$alpha_run_dir/result.json" "\"status\": \"succeeded\""
 assert_file_contains "$alpha_run_dir/result.json" "\"todo_update_applied\": true"
 assert_file_contains "$alpha_run_dir/result.json" "implemented first task"
+assert_file_contains "$alpha_run_dir/stdout.log" "argv:-p --dangerously-skip-permissions"
 assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/last_run.json" "\"status\": \"succeeded\""
+assert_file_contains "$tmux_state/tmux.log" "new-window -d -t autopilot -n start-AlphaProject-"
+assert_file_contains "$stdout3" "started task window: autopilot:start-AlphaProject-"
 
 # Case 4:
 # Failure should keep TODO unchanged and still persist artifacts.
@@ -172,8 +253,8 @@ cat >"$home2/.autopilot/projects/FailureProject/TODO.md" <<'EOF'
 EOF
 stderr4="$TMP_DIR/start_stderr4.txt"
 set +e
-HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_EXIT_CODE=9 FAKE_AGENT_STDOUT="partial log" \
-  FAKE_AGENT_NAME="claude" \
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_EXIT_CODE=9 FAKE_AGENT_STDOUT="partial log" \
+  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
   "$AP_BIN" start FailureProject > /dev/null 2>"$stderr4"
 status4=$?
 set -e
@@ -205,7 +286,8 @@ cat >"$home2/.autopilot/projects/MultiProject/TODO.md" <<'EOF'
 EOF
 stderr5="$TMP_DIR/start_stderr5.txt"
 set +e
-HOME="$home2" PATH="$fake_bin:$PATH" "$AP_BIN" start MultiProject 2>"$stderr5" >/dev/null
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start MultiProject 2>"$stderr5" >/dev/null
 status5=$?
 set -e
 if [[ "$status5" -eq 0 ]]; then
@@ -228,7 +310,8 @@ cat >"$home2/.autopilot/projects/EmptyProject/TODO.md" <<'EOF'
 EOF
 stderr6="$TMP_DIR/start_stderr6.txt"
 set +e
-HOME="$home2" PATH="$fake_bin:$PATH" "$AP_BIN" start EmptyProject 2>"$stderr6" >/dev/null
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start EmptyProject 2>"$stderr6" >/dev/null
 status6=$?
 set -e
 if [[ "$status6" -eq 0 ]]; then
@@ -254,11 +337,12 @@ cat >"$home2/.autopilot/config.toml" <<'EOF'
 agent = "codex"
 EOF
 stdout7="$TMP_DIR/start_stdout7.txt"
-HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="configured agent run" \
-  FAKE_AGENT_NAME="codex" "$AP_BIN" start ConfigProject >"$stdout7"
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="configured agent run" \
+  FAKE_AGENT_NAME="codex" FAKE_TMUX_STATE_DIR="$tmux_state" "$AP_BIN" start ConfigProject >"$stdout7"
 config_run_dir="$(latest_run_dir "$home2/.autopilot/projects/ConfigProject")"
 assert_file_contains "$stdout7" "completed task: config task"
 assert_file_contains "$config_run_dir/meta.json" "\"agent\": \"codex\""
+assert_file_contains "$config_run_dir/stdout.log" "argv:exec --skip-git-repo-check --sandbox workspace-write --full-auto"
 assert_file_contains "$config_run_dir/stdout.log" "codex:configured agent run"
 
 # Case 8:
@@ -281,7 +365,10 @@ fake_claude_only="$TMP_DIR/fake-claude-only"
 write_fake_agent "$fake_claude_only" claude
 stderr8="$TMP_DIR/start_stderr8.txt"
 set +e
-HOME="$home2" PATH="$fake_claude_only" FAKE_AGENT_NAME="claude" \
+write_fake_tmux "$fake_claude_only"
+missing_tmux_state="$TMP_DIR/missing-tmux-state"
+mkdir -p "$missing_tmux_state"
+env -u TMUX HOME="$home2" PATH="$fake_claude_only" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$missing_tmux_state" \
   "$AP_BIN" start MissingAgentProject 2>"$stderr8" >/dev/null
 status8=$?
 set -e

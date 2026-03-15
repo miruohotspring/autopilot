@@ -7,6 +7,7 @@
 #include "autopilot/projects/todo_task_selector.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -28,6 +29,19 @@ struct SelectedProjectPath {
   std::string name;
   fs::path path;
 };
+
+std::string shell_quote(const std::string& s) {
+  std::string quoted = "'";
+  for (char ch : s) {
+    if (ch == '\'') {
+      quoted += "'\\''";
+    } else {
+      quoted.push_back(ch);
+    }
+  }
+  quoted.push_back('\'');
+  return quoted;
+}
 
 std::string json_escape(const std::string& input) {
   std::string out;
@@ -160,6 +174,111 @@ SelectedProjectPath resolve_project_path(
   }
 
   throw std::runtime_error("project has multiple paths and no 'main'");
+}
+
+std::string sanitize_tmux_name(std::string s) {
+  for (char& ch : s) {
+    const bool is_alnum =
+        (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+    if (!is_alnum && ch != '-' && ch != '_') {
+      ch = '-';
+    }
+  }
+  return s;
+}
+
+bool tmux_is_available() {
+  return std::getenv("AUTOPILOT_START_DISABLE_TMUX") == nullptr &&
+         std::system("tmux -V >/dev/null 2>&1") == 0;
+}
+
+void touch_empty_file(const fs::path& path) {
+  std::ofstream out(path, std::ios::trunc);
+  if (!out) {
+    throw std::runtime_error("failed to create file: " + path.string());
+  }
+}
+
+int read_exit_code_file(const fs::path& exit_code_file) {
+  std::ifstream in(exit_code_file);
+  if (!in) {
+    throw std::runtime_error("failed to read exit code file: " + exit_code_file.string());
+  }
+  int exit_code = 1;
+  in >> exit_code;
+  return exit_code;
+}
+
+AgentLaunchResult run_agent_in_tmux(
+    const std::string& project_name,
+    const std::string& run_id,
+    const std::string& agent_name,
+    const std::string& prompt,
+    const fs::path& working_directory,
+    const fs::path& stdout_log,
+    const fs::path& stderr_log) {
+  const std::string session = "autopilot";
+  const std::string window_name = sanitize_tmux_name("start-" + project_name + "-" + run_id);
+  const std::string target = session + ":" + window_name;
+  const std::string channel = sanitize_tmux_name("ap-start-" + project_name + "-" + run_id);
+  const fs::path exit_code_file = stdout_log.parent_path() / "agent.exit";
+
+  touch_empty_file(stdout_log);
+  touch_empty_file(stderr_log);
+  touch_empty_file(exit_code_file);
+
+  const bool session_exists =
+      std::system(("tmux has-session -t " + session + " >/dev/null 2>&1").c_str()) == 0;
+
+  const std::string agent_command =
+      "cd " + shell_quote(working_directory.string()) + " && " +
+      build_agent_shell_command(agent_name, prompt) + " > >(tee " + shell_quote(stdout_log.string()) +
+      ") 2> >(tee " + shell_quote(stderr_log.string()) + " >&2)";
+  const std::string worker_script =
+      "set +e; " + agent_command + "; status=$?; printf '%s\\n' \"$status\" > " +
+      shell_quote(exit_code_file.string()) + "; tmux wait-for -S " + shell_quote(channel) +
+      "; tmux kill-window -t " + shell_quote(target);
+  const std::string tmux_command = "bash -lc " + shell_quote(worker_script);
+
+  if (!session_exists) {
+    const std::string create_session_cmd =
+        "tmux new-session -d -s " + session + " -n " + shell_quote(window_name) + " " +
+        shell_quote(tmux_command);
+    if (std::system(create_session_cmd.c_str()) != 0) {
+      throw std::runtime_error("failed to create tmux session");
+    }
+  } else {
+    const std::string create_window_cmd =
+        "tmux new-window -d -t " + session + " -n " + shell_quote(window_name) + " " +
+        shell_quote(tmux_command);
+    if (std::system(create_window_cmd.c_str()) != 0) {
+      throw std::runtime_error("failed to create tmux window");
+    }
+  }
+
+  if (std::getenv("TMUX") != nullptr) {
+    const std::string switch_cmd = "tmux switch-client -t " + shell_quote(target);
+    if (std::system(switch_cmd.c_str()) != 0) {
+      throw std::runtime_error("failed to switch tmux client");
+    }
+    if (std::system(("tmux wait-for " + shell_quote(channel)).c_str()) != 0) {
+      throw std::runtime_error("failed to wait for tmux task completion");
+    }
+  } else if (!session_exists) {
+    const std::string attach_cmd = "tmux attach-session -t " + shell_quote(target);
+    if (std::system(attach_cmd.c_str()) != 0) {
+      throw std::runtime_error("failed to attach tmux session");
+    }
+  } else {
+    std::cout << "started task window: " << target << '\n';
+    if (std::system(("tmux wait-for " + shell_quote(channel)).c_str()) != 0) {
+      throw std::runtime_error("failed to wait for tmux task completion");
+    }
+  }
+
+  const int exit_code = read_exit_code_file(exit_code_file);
+  fs::remove(exit_code_file);
+  return AgentLaunchResult{agent_name, exit_code};
 }
 
 std::string resolve_project_name(const std::optional<std::string>& maybe_project_name) {
@@ -309,8 +428,21 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
             std::nullopt));
 
     const auto started_clock = std::chrono::steady_clock::now();
-    const AgentLaunchResult launch_result =
-        run_agent(agent_name, prompt, selected_path.path, stdout_file, stderr_file);
+    const AgentLaunchResult launch_result = tmux_is_available()
+                                                ? run_agent_in_tmux(
+                                                      project_name,
+                                                      run_id,
+                                                      agent_name,
+                                                      prompt,
+                                                      selected_path.path,
+                                                      stdout_file,
+                                                      stderr_file)
+                                                : run_agent(
+                                                      agent_name,
+                                                      prompt,
+                                                      selected_path.path,
+                                                      stdout_file,
+                                                      stderr_file);
     const auto ended_clock = std::chrono::steady_clock::now();
 
     const std::string ended_at = current_timestamp_with_offset();

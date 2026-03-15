@@ -1,4 +1,10 @@
 # autopilot managed config
+#
+# [start]
+# agent:
+#   Preferred agent for `ap start`.
+#   Supported values now: "claude", "codex".
+#   If omitted, `ap start` falls back to automatic detection.
 
 [start]
 agent = "claude"

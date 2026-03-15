@@ -53,9 +53,21 @@ std::optional<fs::path> find_executable_in_path(const std::string& name) {
   return std::nullopt;
 }
 
-std::string build_agent_command(const std::string& agent_name, const std::string& prompt) {
+} // namespace
+
+std::string build_agent_shell_command(const std::string& agent_name, const std::string& prompt) {
+  if (agent_name == "codex") {
+    return shell_quote(agent_name) +
+           " exec --skip-git-repo-check --sandbox workspace-write --full-auto " +
+           shell_quote(prompt);
+  }
+  if (agent_name == "claude") {
+    return shell_quote(agent_name) + " -p --dangerously-skip-permissions " + shell_quote(prompt);
+  }
   return shell_quote(agent_name) + " " + shell_quote(prompt);
 }
+
+namespace {
 
 std::string trim_ascii_whitespace(const std::string& s) {
   const std::size_t begin = s.find_first_not_of(" \t\r\n");
@@ -174,7 +186,7 @@ AgentLaunchResult run_agent(
 
   const std::string command =
       "cd " + shell_quote(working_directory.string()) + " && " +
-      build_agent_command(agent_name, prompt) + " >" + shell_quote(stdout_log.string()) + " 2>" +
+      build_agent_shell_command(agent_name, prompt) + " >" + shell_quote(stdout_log.string()) + " 2>" +
       shell_quote(stderr_log.string());
 
   const int exit_code = decode_system_exit_code(std::system(command.c_str()));

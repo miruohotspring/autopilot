@@ -248,6 +248,16 @@ Notes:
 - Headings and plain bullet lists are ignored.
 - If no `- [ ] ...` line exists, `ap start` fails with `ap start failed: no runnable task found in TODO.md`.
 
+If `tmux` is available, `ap start` also uses tmux for progress visibility:
+
+- If session `autopilot` does not exist, `ap start` creates it and runs the task in a new worker window.
+- If session `autopilot` already exists, `ap start` adds a new worker window to that session.
+- Inside tmux, `ap start` switches the current client to the worker window.
+- Outside tmux, `ap start` attaches only when it created a fresh `autopilot` session. If the session already exists, it prints the worker window name and waits for completion without attaching.
+- When the task finishes, the worker window closes automatically.
+
+If `tmux` is not available, `ap start` falls back to direct execution.
+
 ## Briefing tmux session
 
 ```bash
