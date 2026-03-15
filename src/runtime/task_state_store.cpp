@@ -34,6 +34,7 @@ void write_text_file(const fs::path& path, const std::string& content) {
 
 TaskState parse_task_state_file(const fs::path& path, const std::string& default_related_path) {
   try {
+    (void)default_related_path;
     const std::string json = read_text_file(path);
     TaskState task;
     task.id = json_read_required_string(json, "id");
@@ -44,8 +45,8 @@ TaskState parse_task_state_file(const fs::path& path, const std::string& default
     task.depends_on = json_read_optional_string_array(json, "depends_on").value_or(
         std::vector<std::string>{});
     task.approval_required = json_read_optional_bool(json, "approval_required").value_or(false);
-    task.related_paths = json_read_optional_string_array(json, "related_paths")
-                             .value_or(std::vector<std::string>{default_related_path});
+    task.related_paths =
+        json_read_optional_string_array(json, "related_paths").value_or(std::vector<std::string>{});
     task.generated_by = json_read_optional_string(json, "generated_by").value_or("human.todo");
     task.source_file = json_read_required_string(json, "source_file");
     task.source_line = static_cast<std::size_t>(json_read_required_integer(json, "source_line"));
@@ -178,13 +179,17 @@ void save_project_state(const fs::path& project_file, const ProjectState& projec
   write_text_file(project_file, build_project_state_json(project));
 }
 
-std::string allocate_next_task_id(const std::vector<TaskState>& tasks) {
+std::string allocate_next_task_id(
+    const std::vector<TaskState>& tasks, const std::string& project_slug) {
   int max_id = 0;
   for (const TaskState& task : tasks) {
-    if (task.id.rfind("task-", 0) != 0) {
+    if (task.id.rfind(project_slug + "-", 0) != 0) {
       continue;
     }
-    const std::string numeric = task.id.substr(5);
+    const std::string numeric = task.id.substr(project_slug.size() + 1);
+    if (numeric.size() != 4) {
+      continue;
+    }
     try {
       max_id = std::max(max_id, std::stoi(numeric));
     } catch (const std::exception&) {
@@ -192,7 +197,7 @@ std::string allocate_next_task_id(const std::vector<TaskState>& tasks) {
   }
 
   std::ostringstream oss;
-  oss << "task-" << std::setw(4) << std::setfill('0') << (max_id + 1);
+  oss << project_slug << '-' << std::setw(4) << std::setfill('0') << (max_id + 1);
   return oss.str();
 }
 

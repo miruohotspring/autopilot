@@ -437,9 +437,6 @@ void validate_task_state(
   const std::map<std::string, const TaskState*> task_index = build_task_index(tasks);
 
   for (const TaskState& task : tasks) {
-    if (task.related_paths.empty()) {
-      throw std::runtime_error("invalid related path in task " + task.id);
-    }
     for (const std::string& related_path : task.related_paths) {
       if (related_path.empty() || valid_path_names.find(related_path) == valid_path_names.end()) {
         throw std::runtime_error("invalid related path in task " + task.id);
@@ -494,6 +491,9 @@ bool dependencies_are_resolved(
 }
 
 bool task_matches_selected_path(const TaskState& task, const std::string& selected_path_name) {
+  if (task.related_paths.empty()) {
+    return true;
+  }
   return std::find(task.related_paths.begin(), task.related_paths.end(), selected_path_name) !=
          task.related_paths.end();
 }
@@ -648,6 +648,8 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
   try {
     const std::string project_name = resolve_project_name(maybe_project_name);
     const fs::path project_dir = project_dir_path(project_name);
+    const ProjectConfig project_config =
+        load_required_project_config(project_config_file_path(project_name));
     const fs::path projects_file = projects_file_path();
     const SelectedProjectPath selected_path = resolve_project_path(projects_file, project_name);
     const fs::path todo_file = project_dir / "TODO.md";
@@ -682,23 +684,20 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
 
     TodoSyncResult sync_result;
     try {
-      sync_result =
-          sync_todo_with_task_state(todo_file, existing_tasks, synced_at, selected_path.name);
+      sync_result = sync_todo_with_task_state(
+          todo_file, existing_tasks, synced_at, selected_path.name, project_config.slug);
     } catch (const std::runtime_error& e) {
-      if (std::string(e.what()) == "duplicate TODO task titles are not supported in Phase 4") {
-        event_log.append(
-            project_name,
-            EventRecord{
-                std::nullopt,
-                std::nullopt,
-                "todo.sync_conflict",
-                "ap.start",
-                {EventPayloadField{"message", json_string(e.what())}},
-            });
-        std::cerr << "ap start failed: " << e.what() << '\n';
-        return 1;
-      }
-      throw;
+      event_log.append(
+          project_name,
+          EventRecord{
+              std::nullopt,
+              std::nullopt,
+              "todo.sync_conflict",
+              "ap.start",
+              {EventPayloadField{"message", json_string(e.what())}},
+          });
+      std::cerr << "ap start failed: " << e.what() << '\n';
+      return 1;
     }
 
     const std::vector<TaskStatusChange> recovered_in_progress_changes =
@@ -951,6 +950,7 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
         todo_update_applied = mark_todo_task_done(
             todo_file,
             TodoTaskSelection{
+                selected_task->id,
                 selected_task->title,
                 selected_task->source_line,
                 selected_task->source_text,

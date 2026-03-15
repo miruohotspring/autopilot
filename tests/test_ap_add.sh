@@ -149,8 +149,8 @@ assert_file_contains "$stderr1" "Please run ap init first"
 # Prepare reusable HOME and projects.
 home2="$TMP_DIR/home2"
 mkdir -p "$home2/.autopilot"
-HOME="$home2" "$AP_BIN" new AlphaProject >/dev/null
-HOME="$home2" "$AP_BIN" new BetaProject >/dev/null
+HOME="$home2" "$AP_BIN" new AlphaProject alpha >/dev/null
+HOME="$home2" "$AP_BIN" new BetaProject beta >/dev/null
 projects_file="$home2/.autopilot/projects.yaml"
 
 # Case 2:
@@ -166,6 +166,7 @@ expected_abs_rel="$(cd "$TMP_DIR/work/rel_here" && pwd -P)"
 assert_file_contains "$stdout2" "added path: $expected_abs_rel"
 assert_project_has_name_path "$projects_file" "AlphaProject" "rel-root" "$expected_abs_rel"
 assert_symlink_target "$home2/.autopilot/projects/AlphaProject/rel-root" "$expected_abs_rel"
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/project.yaml" "  - 'rel-root'"
 
 # Case 3:
 # Duplicate path+name should be no-op and not an error.
@@ -191,6 +192,7 @@ assert_file_not_contains "$stdout4" "[y/n]"
 assert_project_has_name_path "$projects_file" "BetaProject" "interactive" "$interactive_path"
 assert_project_not_has_path "$projects_file" "AlphaProject" "$interactive_path"
 assert_symlink_target "$home2/.autopilot/projects/BetaProject/interactive" "$interactive_path"
+assert_file_contains "$home2/.autopilot/projects/BetaProject/project.yaml" "  - 'interactive'"
 
 # Case 5:
 # Unknown and invalid project names should fail.
@@ -217,6 +219,7 @@ printf '\n' | HOME="$home2" "$AP_BIN" add "$main_path" -p AlphaProject >"$stdout
 assert_file_contains "$stdout6" "Enter path name [main]:"
 assert_project_has_name_path "$projects_file" "AlphaProject" "main" "$main_path"
 assert_symlink_target "$home2/.autopilot/projects/AlphaProject/main" "$main_path"
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/project.yaml" "  - 'main'"
 
 # Case 7:
 # If main already exists, empty input should fail and explicit name should be required.

@@ -57,5 +57,5 @@ void save_task_state(const std::filesystem::path& tasks_dir, const TaskState& ta
 void save_task_states(const std::filesystem::path& tasks_dir, const std::vector<TaskState>& tasks);
 void save_project_state(const std::filesystem::path& project_file, const ProjectState& project);
 
-std::string allocate_next_task_id(const std::vector<TaskState>& tasks);
+std::string allocate_next_task_id(const std::vector<TaskState>& tasks, const std::string& project_slug);
 ProjectTaskCounts compute_project_task_counts(const std::vector<TaskState>& tasks);

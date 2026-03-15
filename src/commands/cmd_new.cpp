@@ -10,7 +10,9 @@
 
 namespace fs = std::filesystem;
 
-int cmd_new(const std::optional<std::string>& maybe_project_name) {
+int cmd_new(
+    const std::optional<std::string>& maybe_project_name,
+    const std::optional<std::string>& maybe_project_slug) {
   std::string project_name;
   if (maybe_project_name.has_value()) {
     project_name = *maybe_project_name;
@@ -23,8 +25,24 @@ int cmd_new(const std::optional<std::string>& maybe_project_name) {
     }
   }
 
+  std::string project_slug;
+  if (maybe_project_slug.has_value()) {
+    project_slug = *maybe_project_slug;
+  } else {
+    std::cout << "Enter project slug: ";
+    std::cout.flush();
+    if (!std::getline(std::cin, project_slug)) {
+      std::cerr << "failed to read project slug\n";
+      return 1;
+    }
+  }
+
   if (!is_valid_project_name(project_name)) {
     std::cerr << "invalid project name\n";
+    return 1;
+  }
+  if (!is_valid_project_slug(project_slug)) {
+    std::cerr << "invalid project slug\n";
     return 1;
   }
 
@@ -82,6 +100,9 @@ int cmd_new(const std::optional<std::string>& maybe_project_name) {
 
     write_heading_file(new_project_dir / "TODO.md", "TODO");
     write_dashboard_file(new_project_dir / "dashboard.md");
+    save_project_config(
+        new_project_dir / "project.yaml",
+        ProjectConfig{project_name, project_slug, {}});
 
     const bool needs_leading_newline = !file_ends_with_newline(projects_file);
     std::ofstream out(projects_file, std::ios::app);

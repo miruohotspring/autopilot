@@ -170,6 +170,13 @@ int cmd_add(
       throw;
     }
 
+    ProjectConfig project_config = load_required_project_config(project_config_file_path(project_name));
+    project_config.paths.clear();
+    for (const ProjectPathEntry& entry : load_project_path_entries(projects_file, project_name)) {
+      project_config.paths.push_back(entry.name);
+    }
+    save_project_config(project_config_file_path(project_name), project_config);
+
     std::cout << "added path: " << normalized_path << '\n';
     return 0;
   } catch (const std::exception& e) {

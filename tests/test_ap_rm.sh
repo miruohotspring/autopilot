@@ -117,8 +117,8 @@ fi
 assert_file_contains "$stderr2" "project not found"
 
 # Prepare projects and paths for rm scenarios.
-HOME="$home2" "$AP_BIN" new AlphaProject >/dev/null
-HOME="$home2" "$AP_BIN" new BetaProject >/dev/null
+HOME="$home2" "$AP_BIN" new AlphaProject alpha >/dev/null
+HOME="$home2" "$AP_BIN" new BetaProject beta >/dev/null
 path_a1="$TMP_DIR/p-a1"
 path_a2="$TMP_DIR/p-a2"
 path_b1="$TMP_DIR/p-b1"
@@ -139,6 +139,8 @@ assert_file_contains "$stdout3" "Remove path '"
 assert_file_contains "$stdout3" "removed path:"
 assert_project_not_has_path "$projects_file" "AlphaProject" "$path_a1"
 assert_project_has_path "$projects_file" "AlphaProject" "$path_a2"
+assert_file_not_contains "$home2/.autopilot/projects/AlphaProject/project.yaml" "  - 'a1'"
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/project.yaml" "  - 'a2'"
 
 # Case 4:
 # n confirmation should cancel removal.
@@ -166,11 +168,12 @@ assert_file_contains "$stdout5" "Select path to remove:"
 assert_file_contains "$stdout5" "Enter number to remove:"
 assert_project_not_has_path "$projects_file" "BetaProject" "$path_b1"
 assert_file_not_contains "$stdout5" "[y/n]:\nDelete project"
+assert_file_contains "$home2/.autopilot/projects/BetaProject/project.yaml" "paths: []"
 
 # Case 6:
 # Project with no paths should fail.
 echo "[test] fails when selected project has no paths"
-HOME="$home2" "$AP_BIN" new EmptyProject >/dev/null
+HOME="$home2" "$AP_BIN" new EmptyProject empty >/dev/null
 stderr6="$TMP_DIR/rm_stderr6.txt"
 set +e
 HOME="$home2" "$AP_BIN" rm -p EmptyProject 2>"$stderr6" >/dev/null

@@ -7,6 +7,7 @@
 
 std::optional<std::string> select_project_to_delete(const std::set<std::string>& projects);
 std::optional<std::string> select_project_to_add_path(const std::set<std::string>& projects);
+std::optional<std::string> select_project_to_add_task(const std::set<std::string>& projects);
 std::optional<std::string> select_project_to_remove_path(const std::set<std::string>& projects);
 std::optional<std::string> select_project_to_start(const std::set<std::string>& projects);
 std::optional<std::string> select_path_to_remove(const std::vector<std::string>& paths);

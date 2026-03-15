@@ -34,4 +34,5 @@ TodoSyncResult sync_todo_with_task_state(
     const std::filesystem::path& todo_file,
     const std::vector<TaskState>& existing_tasks,
     const std::string& synced_at,
-    const std::string& default_related_path);
+    const std::string& default_related_path,
+    const std::string& project_slug);

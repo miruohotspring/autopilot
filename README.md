@@ -100,16 +100,18 @@ Supported values are `claude` and `codex`.
 ## New project
 
 ```bash
-ap new <project_name>
+ap new <project_name> <slug>
 ```
 
-If `<project_name>` is omitted, `ap` asks interactively:
+If either value is omitted, `ap` asks interactively:
 
 ```text
 Enter your new project name:
+Enter project slug:
 ```
 
 `project_name` can include letters, numbers, and hyphens (`-`), and cannot start or end with a hyphen.
+`slug` must match `^[a-z][a-z0-9-]*$`.
 
 `ap new` adds project entries with this structure:
 
@@ -129,6 +131,7 @@ $HOME/.autopilot/projects/<project_name>
 
 - `TODO.md`
 - `dashboard.md` (captain -> colonel status handoff template)
+- `project.yaml` (`name`, `slug`, `paths`)
 
 ## Delete project
 
@@ -212,6 +215,8 @@ If the same `name/path` pair already exists in the target project, `ap add` does
 $HOME/.autopilot/projects/<project_name>/<name> -> <path>
 ```
 
+It also updates `$HOME/.autopilot/projects/<project_name>/project.yaml` to keep the path-name list in sync.
+
 ## Remove path
 
 ```bash
@@ -222,6 +227,22 @@ If `-p <project_name>` is omitted, `ap` asks you to select a project.
 
 `ap rm` then shows the path list in that project, asks which path to remove, and confirms with `y/n`.
 
+## Add task
+
+```bash
+ap task add <title> [-p <project_name>]
+```
+
+If `-p <project_name>` is omitted, `ap` asks you to select a project.
+
+`ap task add` allocates a stable task ID using the project's slug and appends a visible ID line to `TODO.md`:
+
+```markdown
+- [ ] [demo-0001] Add ap start command
+```
+
+It also creates the matching runtime task state file.
+
 ## Start task
 
 ```bash
@@ -230,27 +251,27 @@ ap start [project_name]
 
 If `<project_name>` is omitted, `ap` asks you to select a project.
 
-`ap start` reads the target project's `TODO.md` and picks the first unchecked task it finds.
+`ap start` syncs the target project's `TODO.md` with runtime task state and then selects the first runnable task from state.
 
-Current `TODO.md` format is intentionally minimal. A runnable task line must be exactly this checklist form:
+Current `TODO.md` task lines must include a visible stable task ID:
 
 ```markdown
-- [ ] Implement ap start command
-- [ ] Add integration tests
+- [ ] [demo-0001] Implement ap start command
+- [ ] [demo-0002] Add integration tests
 ```
 
 Completed tasks must use:
 
 ```markdown
-- [x] Implement ap start command
+- [x] [demo-0001] Implement ap start command
 ```
 
 Notes:
 
-- `ap start` only recognizes lines that start with `- [ ] `.
-- It scans `TODO.md` from top to bottom and runs the first matching line.
-- Headings and plain bullet lists are ignored.
-- If no `- [ ] ...` line exists, `ap start` fails with `ap start failed: no runnable task found in TODO.md`.
+- Task IDs must match `<slug>-NNNN`.
+- Duplicate IDs, invalid ID format, slug mismatch, and unknown IDs are hard errors.
+- Reordering or renaming a TODO line keeps task identity as long as the ID stays the same.
+- If no runnable task exists after sync, `ap start` fails with `ap start failed: no runnable task`.
 
 If `tmux` is available, `ap start` also uses tmux for progress visibility:
 

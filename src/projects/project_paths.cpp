@@ -17,6 +17,10 @@ fs::path project_dir_path(const std::string& project_name) {
   return projects_dir_path() / project_name;
 }
 
+fs::path project_config_file_path(const std::string& project_name) {
+  return project_dir_path(project_name) / "project.yaml";
+}
+
 fs::path projects_file_path() {
   return autopilot_dir_path() / "projects.yaml";
 }

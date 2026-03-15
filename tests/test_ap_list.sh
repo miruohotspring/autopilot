@@ -68,8 +68,8 @@ assert_file_contains "$stdout2" "no projects"
 # Case 3:
 # Existing projects should be listed one per line in sorted order.
 echo "[test] lists existing projects"
-HOME="$home2" "$AP_BIN" new Zebra >/dev/null
-HOME="$home2" "$AP_BIN" new Alpha >/dev/null
+HOME="$home2" "$AP_BIN" new Zebra zebra >/dev/null
+HOME="$home2" "$AP_BIN" new Alpha alpha >/dev/null
 stdout3="$TMP_DIR/list_stdout3.txt"
 HOME="$home2" "$AP_BIN" list >"$stdout3"
 assert_line_equals "$stdout3" 1 "Alpha"

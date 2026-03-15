@@ -193,6 +193,14 @@ std::optional<std::string> select_project_to_add_path(const std::set<std::string
       "Enter number to add path: ");
 }
 
+std::optional<std::string> select_project_to_add_task(const std::set<std::string>& projects) {
+  return select_project_with_ui(
+      projects,
+      "Select project to add task:",
+      "? Select project to add task (Use arrow keys or j/k)",
+      "Enter number to add task: ");
+}
+
 std::optional<std::string> select_project_to_remove_path(const std::set<std::string>& projects) {
   return select_project_with_ui(
       projects,

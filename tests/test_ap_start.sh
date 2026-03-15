@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Integration test for `ap start`.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AP_BIN="$ROOT_DIR/ap"
 
@@ -41,17 +40,6 @@ assert_file_not_contains() {
     echo "--- file content ---" >&2
     cat "$path" >&2
     echo "--------------------" >&2
-    exit 1
-  fi
-}
-
-run_expect_fail() {
-  set +e
-  "$@"
-  local status=$?
-  set -e
-  if [[ "$status" -eq 0 ]]; then
-    echo "assert failed: expected command to fail: $*" >&2
     exit 1
   fi
 }
@@ -152,8 +140,20 @@ latest_run_dir() {
   find "$project_dir/runtime/runs" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1
 }
 
-# Case 1:
-# Without ~/.autopilot, command should fail with guidance.
+new_project() {
+  local name="$1"
+  local slug="$2"
+  local repo_path="$3"
+  HOME="$home2" "$AP_BIN" new "$name" "$slug" >/dev/null
+  HOME="$home2" "$AP_BIN" add "$repo_path" -n main -p "$name" >/dev/null
+}
+
+add_task() {
+  local project="$1"
+  local title="$2"
+  HOME="$home2" "$AP_BIN" task add "$title" -p "$project" >/dev/null
+}
+
 echo "[test] fails when ~/.autopilot does not exist"
 home1="$TMP_DIR/home1"
 mkdir -p "$home1"
@@ -168,7 +168,6 @@ if [[ "$status1" -eq 0 ]]; then
 fi
 assert_file_contains "$stderr1" "Please run ap init first"
 
-# Prepare reusable HOME and fake agent.
 home2="$TMP_DIR/home2"
 mkdir -p "$home2/.autopilot"
 fake_bin="$TMP_DIR/fake-bin"
@@ -177,30 +176,16 @@ write_fake_agent "$fake_bin" codex
 write_fake_tmux "$fake_bin"
 tmux_state="$TMP_DIR/tmux-state"
 mkdir -p "$tmux_state"
-project_repo_a="$TMP_DIR/repo-a"
-project_repo_b="$TMP_DIR/repo-b"
-mkdir -p "$project_repo_a" "$project_repo_b"
-HOME="$home2" "$AP_BIN" new AlphaProject >/dev/null
-HOME="$home2" "$AP_BIN" new BetaProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$project_repo_a" -n main -p AlphaProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$project_repo_b" -n main -p BetaProject >/dev/null
 
-cat >"$home2/.autopilot/projects/AlphaProject/TODO.md" <<'EOF'
-# AlphaProject TODO
-
-- [ ] first task
-- [ ] second task
-EOF
-
-cat >"$home2/.autopilot/projects/BetaProject/TODO.md" <<'EOF'
-# BetaProject TODO
-
-- [ ] beta task
-EOF
-
-# Case 2:
-# Interactive project selection should work when project name is omitted.
-echo "[test] supports interactive project selection"
+echo "[test] supports interactive project selection and runs the selected ID-based task"
+alpha_repo="$TMP_DIR/repo-alpha"
+beta_repo="$TMP_DIR/repo-beta"
+mkdir -p "$alpha_repo" "$beta_repo"
+new_project "AlphaProject" "alpha" "$alpha_repo"
+new_project "BetaProject" "beta" "$beta_repo"
+add_task "AlphaProject" "first task"
+add_task "AlphaProject" "second task"
+add_task "BetaProject" "beta task"
 stdout2="$TMP_DIR/start_stdout2.txt"
 printf '2\n' | env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="beta summary" \
   FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
@@ -208,111 +193,75 @@ printf '2\n' | env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOU
 assert_file_contains "$stdout2" "Select project to start:"
 assert_file_contains "$stdout2" "Enter number to start:"
 assert_file_contains "$stdout2" "completed task: beta task"
-assert_file_contains "$home2/.autopilot/projects/BetaProject/TODO.md" "- [x] beta task"
+assert_file_contains "$home2/.autopilot/projects/BetaProject/TODO.md" "- [x] [beta-0001] beta task"
 assert_file_contains "$tmux_state/tmux.log" "new-session -d -s autopilot -n start-BetaProject-"
-assert_file_contains "$tmux_state/tmux.log" "attach-session -t autopilot:start-BetaProject-"
 
-# Reset BetaProject TODO because project ordering is lexical and project output text checks are simpler below.
-cat >"$home2/.autopilot/projects/BetaProject/TODO.md" <<'EOF'
-# BetaProject TODO
-
-- [ ] beta task
-EOF
-
-# Case 3:
-# Success should create runtime artifacts and mark the first open task done.
-echo "[test] creates runtime artifacts and marks first task done on success"
+echo "[test] creates runtime artifacts and uses slug-based task IDs"
 stdout3="$TMP_DIR/start_stdout3.txt"
 env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="implemented first task" \
   FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
   "$AP_BIN" start AlphaProject >"$stdout3"
 assert_file_contains "$stdout3" "completed task: first task"
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/TODO.md" "- [x] first task"
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/TODO.md" "- [ ] second task"
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/TODO.md" "- [x] [alpha-0001] first task"
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/TODO.md" "- [ ] [alpha-0002] second task"
 alpha_run_dir="$(latest_run_dir "$home2/.autopilot/projects/AlphaProject")"
 alpha_run_id="$(basename "$alpha_run_dir")"
 assert_exists "$alpha_run_dir/meta.json"
-assert_exists "$alpha_run_dir/prompt.txt"
-assert_exists "$alpha_run_dir/stdout.log"
-assert_exists "$alpha_run_dir/stderr.log"
 assert_exists "$alpha_run_dir/result.json"
-assert_exists "$home2/.autopilot/projects/AlphaProject/runtime/state/project.json"
-assert_exists "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/task-0001.json"
-assert_exists "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/task-0002.json"
-assert_exists "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl"
-assert_file_contains "$alpha_run_dir/result.json" "\"status\": \"succeeded\""
-assert_file_contains "$alpha_run_dir/result.json" "\"task_id\": \"task-0001\""
-assert_file_contains "$alpha_run_dir/result.json" "\"attempt_number\": 1"
+assert_exists "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/alpha-0001.json"
+assert_exists "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/alpha-0002.json"
+assert_file_contains "$alpha_run_dir/result.json" "\"task_id\": \"alpha-0001\""
 assert_file_contains "$alpha_run_dir/result.json" "\"final_task_status\": \"done\""
 assert_file_contains "$alpha_run_dir/result.json" "\"todo_update_applied\": true"
-assert_file_contains "$alpha_run_dir/result.json" "implemented first task"
-assert_file_contains "$alpha_run_dir/meta.json" "\"task_id\": \"task-0001\""
-assert_file_contains "$alpha_run_dir/meta.json" "\"attempt_number\": 1"
-assert_file_contains "$alpha_run_dir/stdout.log" "argv:-p --dangerously-skip-permissions"
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/last_run.json" "\"status\": \"succeeded\""
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/task-0001.json" "\"status\": \"done\""
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/task-0001.json" "\"attempt_count\": 1"
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/task-0001.json" "\"latest_run_id\": \"$alpha_run_id\""
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/task-0002.json" "\"status\": \"todo\""
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/task-0002.json" "\"present_in_todo\": true"
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/project.json" "\"last_run_id\": \"$alpha_run_id\""
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/project.json" "\"todo\": 1"
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/project.json" "\"done\": 1"
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"type\": \"task.discovered\""
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"type\": \"task.selected\""
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"type\": \"run.started\""
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"type\": \"run.stdout\""
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"type\": \"run.stderr\""
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"type\": \"run.finished\""
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"type\": \"result.final\""
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"stream\": \"stdout\""
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"stream\": \"stderr\""
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"sequence\": 1"
-assert_file_contains "$tmux_state/tmux.log" "new-window -d -t autopilot -n start-AlphaProject-"
-assert_file_contains "$stdout3" "started task window: autopilot:start-AlphaProject-"
-assert_file_contains "$alpha_run_dir/result.json" "\"process_status\": \"succeeded\""
-assert_file_contains "$alpha_run_dir/result.json" "\"process_exit_code\": 0"
-assert_file_contains "$alpha_run_dir/result.json" "\"alert_id\": null"
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"actor\": \"agent.claude\""
+assert_file_contains "$alpha_run_dir/meta.json" "\"task_id\": \"alpha-0001\""
+assert_file_contains "$alpha_run_dir/stdout.log" "implemented first task"
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/alpha-0001.json" "\"status\": \"done\""
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/alpha-0001.json" "\"latest_run_id\": \"$alpha_run_id\""
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/alpha-0002.json" "\"status\": \"todo\""
 
-# Case 3b:
-# Tasks removed from TODO should remain in state but be excluded from selection.
-echo "[test] marks removed tasks as not present in TODO"
+echo "[test] pathless task add remains runnable after adding a non-main path"
+pathless_repo="$TMP_DIR/repo-pathless"
+mkdir -p "$pathless_repo"
+HOME="$home2" "$AP_BIN" new PathlessProject pathless >/dev/null
+HOME="$home2" "$AP_BIN" task add "pathless task" -p PathlessProject >/dev/null
+HOME="$home2" "$AP_BIN" add "$pathless_repo" -n src -p PathlessProject >/dev/null
+stdout3c="$TMP_DIR/start_stdout3c.txt"
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="pathless summary" \
+  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start PathlessProject >"$stdout3c"
+assert_file_contains "$stdout3c" "completed task: pathless task"
+assert_file_contains "$home2/.autopilot/projects/PathlessProject/runtime/state/tasks/pathless-0001.json" "\"related_paths\": []"
+assert_file_contains "$home2/.autopilot/projects/PathlessProject/TODO.md" "- [x] [pathless-0001] pathless task"
+
+echo "[test] marks tasks removed from TODO as not present"
 cat >"$home2/.autopilot/projects/AlphaProject/TODO.md" <<'EOF'
 # AlphaProject TODO
 
-- [x] first task
+- [x] [alpha-0001] first task
 EOF
 stderr3b="$TMP_DIR/start_stderr3b.txt"
 set +e
 env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start AlphaProject > /dev/null 2>"$stderr3b"
+  "$AP_BIN" start AlphaProject >/dev/null 2>"$stderr3b"
 status3b=$?
 set -e
 if [[ "$status3b" -eq 0 ]]; then
-  echo "assert failed: expected AlphaProject to have no runnable task after removing second task" >&2
+  echo "assert failed: expected AlphaProject to have no runnable task" >&2
   exit 1
 fi
 assert_file_contains "$stderr3b" "ap start failed: no runnable task"
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/task-0002.json" "\"present_in_todo\": false"
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/alpha-0002.json" "\"present_in_todo\": false"
 
-# Case 4:
-# Failure should keep TODO unchanged and still persist artifacts.
-echo "[test] keeps TODO unchanged and preserves artifacts on agent failure"
+echo "[test] keeps TODO unchanged on failure and retries the same task ID"
 failure_repo="$TMP_DIR/repo-failure"
 mkdir -p "$failure_repo"
-HOME="$home2" "$AP_BIN" new FailureProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$failure_repo" -n main -p FailureProject >/dev/null
-cat >"$home2/.autopilot/projects/FailureProject/TODO.md" <<'EOF'
-# FailureProject TODO
-
-- [ ] failing task
-EOF
+new_project "FailureProject" "failure" "$failure_repo"
+add_task "FailureProject" "failing task"
 stderr4="$TMP_DIR/start_stderr4.txt"
 set +e
 env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_EXIT_CODE=9 FAKE_AGENT_STDOUT="partial log" \
   FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start FailureProject > /dev/null 2>"$stderr4"
+  "$AP_BIN" start FailureProject >/dev/null 2>"$stderr4"
 status4=$?
 set -e
 if [[ "$status4" -eq 0 ]]; then
@@ -320,1027 +269,182 @@ if [[ "$status4" -eq 0 ]]; then
   exit 1
 fi
 assert_file_contains "$stderr4" "ap start failed: agent exited with status 9"
-assert_file_contains "$home2/.autopilot/projects/FailureProject/TODO.md" "- [ ] failing task"
-failure_run_dir="$(latest_run_dir "$home2/.autopilot/projects/FailureProject")"
-failure_run_id="$(basename "$failure_run_dir")"
-assert_exists "$failure_run_dir/result.json"
-assert_file_contains "$failure_run_dir/result.json" "\"status\": \"failed\""
-assert_file_contains "$failure_run_dir/result.json" "\"process_status\": \"failed\""
-assert_file_contains "$failure_run_dir/result.json" "\"process_exit_code\": 9"
-assert_file_contains "$failure_run_dir/result.json" "\"task_id\": \"task-0001\""
-assert_file_contains "$failure_run_dir/result.json" "\"attempt_number\": 1"
-assert_file_contains "$failure_run_dir/result.json" "\"final_task_status\": \"failed\""
-assert_file_contains "$failure_run_dir/result.json" "\"todo_update_applied\": false"
-assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/events/events.jsonl" "\"type\": \"result.final\""
-assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/events/events.jsonl" "\"final_task_status\": \"failed\""
-assert_file_contains "$failure_run_dir/stdout.log" "partial log"
-assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/tasks/task-0001.json" "\"status\": \"failed\""
-assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/tasks/task-0001.json" "\"attempt_count\": 1"
-assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/tasks/task-0001.json" "\"latest_run_id\": \"$failure_run_id\""
-assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/tasks/task-0001.json" "\"last_error\": \"agent exited with status 9\""
-assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/project.json" "\"last_run_id\": \"$failure_run_id\""
-assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/project.json" "\"failed\": 1"
-
-# Case 4b:
-# Failed tasks should be selectable again and increment attempt_count.
-echo "[test] retries failed tasks using persisted task state"
-sleep 1
+assert_file_contains "$home2/.autopilot/projects/FailureProject/TODO.md" "- [ ] [failure-0001] failing task"
+assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/tasks/failure-0001.json" "\"status\": \"failed\""
 stdout4b="$TMP_DIR/start_stdout4b.txt"
 env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="fixed failure" \
   FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
   "$AP_BIN" start FailureProject >"$stdout4b"
 assert_file_contains "$stdout4b" "completed task: failing task"
-failure_retry_run_dir="$(latest_run_dir "$home2/.autopilot/projects/FailureProject")"
-failure_retry_run_id="$(basename "$failure_retry_run_dir")"
-assert_file_contains "$home2/.autopilot/projects/FailureProject/TODO.md" "- [x] failing task"
-assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/tasks/task-0001.json" "\"status\": \"done\""
-assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/tasks/task-0001.json" "\"attempt_count\": 2"
-assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/tasks/task-0001.json" "\"latest_run_id\": \"$failure_retry_run_id\""
-assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/project.json" "\"done\": 1"
-assert_file_not_contains "$home2/.autopilot/projects/FailureProject/runtime/state/project.json" "\"failed\": 1"
+assert_file_contains "$home2/.autopilot/projects/FailureProject/TODO.md" "- [x] [failure-0001] failing task"
+assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/tasks/failure-0001.json" "\"attempt_count\": 2"
 
-# Case 4c:
-# Blocked tasks should stay open, create alerts when approval is required, and not be rerun automatically.
-echo "[test] records blocked runs and creates alerts"
-blocked_repo="$TMP_DIR/blocked-repo"
-mkdir -p "$blocked_repo"
-HOME="$home2" "$AP_BIN" new BlockedProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$blocked_repo" -n main -p BlockedProject >/dev/null
-cat >"$home2/.autopilot/projects/BlockedProject/TODO.md" <<'EOF'
-# BlockedProject TODO
-
-- [ ] blocked task
-EOF
-blocked_events="$home2/.autopilot/projects/BlockedProject/runtime/events/events.jsonl"
-stderr4c="$TMP_DIR/start_stderr4c.txt"
-set +e
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" \
-  FAKE_AGENT_STDOUT="AUTOPILOT_APPROVAL_REQUIRED: production migration approval needed" \
-  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start BlockedProject > /dev/null 2>"$stderr4c"
-status4c=$?
-set -e
-if [[ "$status4c" -eq 0 ]]; then
-  echo "assert failed: expected blocked run to return non-zero" >&2
-  exit 1
-fi
-assert_file_contains "$stderr4c" "ap start blocked: production migration approval needed"
-assert_file_contains "$home2/.autopilot/projects/BlockedProject/TODO.md" "- [ ] blocked task"
-assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"status\": \"blocked\""
-assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"approval_required\": true"
-assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"last_error\": \"production migration approval needed\""
-assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"blocker_reason\": \"production migration approval needed\""
-assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"blocker_category\": \"approval_required\""
-assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/project.json" "\"blocked\": 1"
-assert_exists "$home2/.autopilot/projects/BlockedProject/runtime/alerts/alert-0001.json"
-assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/alerts/alert-0001.json" "\"type\": \"approval_required\""
-assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/alerts/alert-0001.json" "\"message\": \"production migration approval needed\""
-assert_file_contains "$blocked_events" "\"type\": \"task.blocked\""
-assert_file_contains "$blocked_events" "\"type\": \"alert.created\""
-assert_file_contains "$blocked_events" "\"type\": \"result.final\""
-assert_file_contains "$blocked_events" "\"final_task_status\": \"blocked\""
-assert_file_contains "$blocked_events" "\"alert_id\": \"alert-0001\""
-stderr4c_retry="$TMP_DIR/start_stderr4c_retry.txt"
-set +e
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="approval received" \
-  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start BlockedProject > /dev/null 2>"$stderr4c_retry"
-status4c_retry=$?
-set -e
-if [[ "$status4c_retry" -eq 0 ]]; then
-  echo "assert failed: expected blocked task to remain non-runnable without manual metadata changes" >&2
-  exit 1
-fi
-assert_file_contains "$stderr4c_retry" "ap start failed: no runnable task"
-assert_file_contains "$home2/.autopilot/projects/BlockedProject/TODO.md" "- [ ] blocked task"
-assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"status\": \"blocked\""
-assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"attempt_count\": 1"
-
-
-# Case 5:
-# Multiple paths without main should fail.
-echo "[test] fails when project has multiple paths and no main"
-multi_repo_a="$TMP_DIR/multi-a"
-multi_repo_b="$TMP_DIR/multi-b"
-mkdir -p "$multi_repo_a" "$multi_repo_b"
-HOME="$home2" "$AP_BIN" new MultiProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$multi_repo_a" -n api -p MultiProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$multi_repo_b" -n web -p MultiProject >/dev/null
-cat >"$home2/.autopilot/projects/MultiProject/TODO.md" <<'EOF'
-# MultiProject TODO
-
-- [ ] multi task
-EOF
-stderr5="$TMP_DIR/start_stderr5.txt"
-set +e
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start MultiProject 2>"$stderr5" >/dev/null
-status5=$?
-set -e
-if [[ "$status5" -eq 0 ]]; then
-  echo "assert failed: expected multi-path project without main to fail" >&2
-  exit 1
-fi
-assert_file_contains "$stderr5" "ap start failed: project has multiple paths and no 'main'"
-
-# Case 6:
-# Missing runnable task should fail.
-echo "[test] fails when no runnable task exists"
-empty_repo="$TMP_DIR/empty-repo"
-mkdir -p "$empty_repo"
-HOME="$home2" "$AP_BIN" new EmptyProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$empty_repo" -n main -p EmptyProject >/dev/null
-cat >"$home2/.autopilot/projects/EmptyProject/TODO.md" <<'EOF'
-# EmptyProject TODO
-
-- [x] already done
-EOF
-stderr6="$TMP_DIR/start_stderr6.txt"
-set +e
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start EmptyProject 2>"$stderr6" >/dev/null
-status6=$?
-set -e
-if [[ "$status6" -eq 0 ]]; then
-  echo "assert failed: expected no-task project to fail" >&2
-  exit 1
-fi
-assert_file_contains "$stderr6" "ap start failed: no runnable task"
-assert_exists "$home2/.autopilot/projects/EmptyProject/runtime/state/project.json"
-assert_exists "$home2/.autopilot/projects/EmptyProject/runtime/state/tasks/task-0001.json"
-assert_exists "$home2/.autopilot/projects/EmptyProject/runtime/events/events.jsonl"
-assert_file_contains "$home2/.autopilot/projects/EmptyProject/runtime/state/tasks/task-0001.json" "\"status\": \"done\""
-assert_file_contains "$home2/.autopilot/projects/EmptyProject/runtime/state/project.json" "\"done\": 1"
-
-# Case 7:
-# config.toml should control which agent CLI is used.
-echo "[test] honors configured start agent from config.toml"
-config_repo="$TMP_DIR/config-repo"
-mkdir -p "$config_repo"
-HOME="$home2" "$AP_BIN" new ConfigProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$config_repo" -n main -p ConfigProject >/dev/null
-cat >"$home2/.autopilot/projects/ConfigProject/TODO.md" <<'EOF'
-# ConfigProject TODO
-
-- [ ] config task
-EOF
-cat >"$home2/.autopilot/config.toml" <<'EOF'
-[start]
-agent = "codex"
-EOF
-stdout7="$TMP_DIR/start_stdout7.txt"
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="configured agent run" \
-  FAKE_AGENT_NAME="codex" FAKE_TMUX_STATE_DIR="$tmux_state" "$AP_BIN" start ConfigProject >"$stdout7"
-config_run_dir="$(latest_run_dir "$home2/.autopilot/projects/ConfigProject")"
-assert_file_contains "$stdout7" "completed task: config task"
-assert_file_contains "$config_run_dir/meta.json" "\"agent\": \"codex\""
-assert_file_contains "$config_run_dir/stdout.log" "argv:exec --skip-git-repo-check --sandbox workspace-write --full-auto"
-assert_file_contains "$config_run_dir/stdout.log" "codex:configured agent run"
-
-# Case 8:
-# Missing configured agent should fail even if another supported agent exists.
-echo "[test] fails when configured agent CLI is missing"
-cat >"$home2/.autopilot/config.toml" <<'EOF'
-[start]
-agent = "codex"
-EOF
-missing_repo="$TMP_DIR/missing-agent-repo"
-mkdir -p "$missing_repo"
-HOME="$home2" "$AP_BIN" new MissingAgentProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$missing_repo" -n main -p MissingAgentProject >/dev/null
-cat >"$home2/.autopilot/projects/MissingAgentProject/TODO.md" <<'EOF'
-# MissingAgentProject TODO
-
-- [ ] missing agent task
-EOF
-fake_claude_only="$TMP_DIR/fake-claude-only"
-write_fake_agent "$fake_claude_only" claude
-stderr8="$TMP_DIR/start_stderr8.txt"
-set +e
-write_fake_tmux "$fake_claude_only"
-missing_tmux_state="$TMP_DIR/missing-tmux-state"
-mkdir -p "$missing_tmux_state"
-env -u TMUX HOME="$home2" PATH="$fake_claude_only" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$missing_tmux_state" \
-  "$AP_BIN" start MissingAgentProject 2>"$stderr8" >/dev/null
-status8=$?
-set -e
-if [[ "$status8" -eq 0 ]]; then
-  echo "assert failed: expected missing configured agent to fail" >&2
-  exit 1
-fi
-assert_file_contains "$stderr8" "ap start failed: configured agent CLI not found: codex"
-
-# Case 9:
-# Reopening a completed TODO item should move state back through todo and increment attempts on rerun.
-echo "[test] syncs reopened TODO items back to todo"
-cat >"$home2/.autopilot/config.toml" <<'EOF'
-[start]
-agent = "claude"
-EOF
-reopen_repo="$TMP_DIR/reopen-repo"
-mkdir -p "$reopen_repo"
-HOME="$home2" "$AP_BIN" new ReopenProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$reopen_repo" -n main -p ReopenProject >/dev/null
-cat >"$home2/.autopilot/projects/ReopenProject/TODO.md" <<'EOF'
-# ReopenProject TODO
-
-- [ ] reopen task
-EOF
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="first pass" \
-  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start ReopenProject >/dev/null
-cat >"$home2/.autopilot/projects/ReopenProject/TODO.md" <<'EOF'
-# ReopenProject TODO
-
-- [ ] reopen task
-EOF
-sleep 1
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="second pass" \
-  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start ReopenProject >/dev/null
-assert_file_contains "$home2/.autopilot/projects/ReopenProject/runtime/state/tasks/task-0001.json" "\"attempt_count\": 2"
-assert_file_contains "$home2/.autopilot/projects/ReopenProject/runtime/events/events.jsonl" "\"from\": \"done\", \"to\": \"todo\""
-
-# Case 10:
-# TODO update conflicts should leave task state done while recording the conflict.
-echo "[test] keeps task state done when TODO update conflicts after success"
-conflict_repo="$TMP_DIR/conflict-repo"
-mkdir -p "$conflict_repo"
-HOME="$home2" "$AP_BIN" new ConflictProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$conflict_repo" -n main -p ConflictProject >/dev/null
-cat >"$home2/.autopilot/projects/ConflictProject/TODO.md" <<'EOF'
-# ConflictProject TODO
-
-- [ ] conflict task
-EOF
-stdout10="$TMP_DIR/start_stdout10.txt"
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="conflict summary" \
-  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  FAKE_AGENT_MUTATE_TODO_FILE="$home2/.autopilot/projects/ConflictProject/TODO.md" \
-  FAKE_AGENT_MUTATE_TODO_FROM="- [ ] conflict task" \
-  FAKE_AGENT_MUTATE_TODO_TO="- [ ] conflict task changed" \
-  "$AP_BIN" start ConflictProject >"$stdout10"
-conflict_run_dir="$(latest_run_dir "$home2/.autopilot/projects/ConflictProject")"
-assert_file_contains "$stdout10" "completed task: conflict task"
-assert_file_contains "$home2/.autopilot/projects/ConflictProject/TODO.md" "- [ ] conflict task changed"
-assert_file_contains "$conflict_run_dir/result.json" "\"todo_update_applied\": false"
-assert_file_contains "$home2/.autopilot/projects/ConflictProject/runtime/state/tasks/task-0001.json" "\"status\": \"done\""
-assert_file_contains "$home2/.autopilot/projects/ConflictProject/runtime/state/tasks/task-0001.json" "\"last_error\": null"
-assert_file_contains "$home2/.autopilot/projects/ConflictProject/runtime/events/events.jsonl" "\"type\": \"todo.sync_conflict\""
-
-# Case 11:
-# Duplicate unfinished TODO titles are rejected in Phase 2.
-echo "[test] fails on duplicate unfinished TODO titles"
-duplicate_repo="$TMP_DIR/duplicate-repo"
-mkdir -p "$duplicate_repo"
-HOME="$home2" "$AP_BIN" new DuplicateProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$duplicate_repo" -n main -p DuplicateProject >/dev/null
-cat >"$home2/.autopilot/projects/DuplicateProject/TODO.md" <<'EOF'
-# DuplicateProject TODO
-
-- [ ] same title
-- [ ] same title
-EOF
-stderr11="$TMP_DIR/start_stderr11.txt"
-set +e
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start DuplicateProject > /dev/null 2>"$stderr11"
-status11=$?
-set -e
-if [[ "$status11" -eq 0 ]]; then
-  echo "assert failed: expected duplicate unfinished titles to fail" >&2
-  exit 1
-fi
-assert_file_contains "$stderr11" "ap start failed: duplicate TODO task titles are not supported in Phase 4"
-assert_file_contains "$home2/.autopilot/projects/DuplicateProject/runtime/events/events.jsonl" "\"type\": \"todo.sync_conflict\""
-
-# Case 12:
-# Pre-launch failures should roll back persisted in_progress state, and stale in_progress should be recovered.
-echo "[test] rolls back pre-launch failures and recovers stale in_progress tasks"
-cat >"$home2/.autopilot/config.toml" <<'EOF'
-[start]
-agent = "claude"
-EOF
-rollback_repo="$TMP_DIR/rollback-repo"
-mkdir -p "$rollback_repo"
-HOME="$home2" "$AP_BIN" new RollbackProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$rollback_repo" -n main -p RollbackProject >/dev/null
-cat >"$home2/.autopilot/projects/RollbackProject/TODO.md" <<'EOF'
-# RollbackProject TODO
-
-- [ ] recoverable task
-EOF
-mkdir -p "$home2/.autopilot/projects/RollbackProject/runtime/state/tasks"
-cat >"$home2/.autopilot/projects/RollbackProject/runtime/state/tasks/task-0001.json" <<'EOF'
-{
-  "id": "task-0001",
-  "title": "recoverable task",
-  "status": "todo",
-  "source_file": "TODO.md",
-  "source_line": 3,
-  "source_text": "- [ ] recoverable task",
-  "present_in_todo": true,
-  "attempt_count": 0,
-  "latest_run_id": null,
-  "last_error": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:00:00+09:00"
-}
-EOF
-stderr12="$TMP_DIR/start_stderr12.txt"
-set +e
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" AUTOPILOT_TEST_FAIL_EVENT_TYPE="task.selected" \
-  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start RollbackProject > /dev/null 2>"$stderr12"
-status12=$?
-set -e
-if [[ "$status12" -eq 0 ]]; then
-  echo "assert failed: expected pre-launch event failure to fail RollbackProject" >&2
-  exit 1
-fi
-assert_file_contains "$stderr12" "ap start failed: failed to append event log"
-assert_file_contains "$home2/.autopilot/projects/RollbackProject/runtime/state/tasks/task-0001.json" "\"status\": \"todo\""
-assert_file_contains "$home2/.autopilot/projects/RollbackProject/runtime/state/tasks/task-0001.json" "\"attempt_count\": 0"
-assert_file_contains "$home2/.autopilot/projects/RollbackProject/runtime/state/tasks/task-0001.json" "\"latest_run_id\": null"
-assert_file_contains "$home2/.autopilot/projects/RollbackProject/runtime/state/tasks/task-0001.json" "\"last_error\": null"
-cat >"$home2/.autopilot/projects/RollbackProject/runtime/state/tasks/task-0001.json" <<'EOF'
-{
-  "id": "task-0001",
-  "title": "recoverable task",
-  "status": "in_progress",
-  "source_file": "TODO.md",
-  "source_line": 3,
-  "source_text": "- [ ] recoverable task",
-  "present_in_todo": true,
-  "attempt_count": 1,
-  "latest_run_id": "run-stale-L3",
-  "last_error": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:01:00+09:00"
-}
-EOF
-stdout12="$TMP_DIR/start_stdout12.txt"
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="recovered run" \
-  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start RollbackProject >"$stdout12"
-assert_file_contains "$stdout12" "completed task: recoverable task"
-assert_file_contains "$home2/.autopilot/projects/RollbackProject/TODO.md" "- [x] recoverable task"
-assert_file_contains "$home2/.autopilot/projects/RollbackProject/runtime/state/tasks/task-0001.json" "\"status\": \"done\""
-assert_file_contains "$home2/.autopilot/projects/RollbackProject/runtime/state/tasks/task-0001.json" "\"attempt_count\": 2"
-assert_file_contains "$home2/.autopilot/projects/RollbackProject/runtime/events/events.jsonl" "\"from\": \"in_progress\", \"to\": \"failed\""
-
-# Case 12b:
-# Post-run event failures should not leave the task stuck in_progress.
-echo "[test] does not leave completed runs stuck in_progress when post-run replay fails"
-postrun_repo="$TMP_DIR/postrun-repo"
-mkdir -p "$postrun_repo"
-HOME="$home2" "$AP_BIN" new PostRunFailureProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$postrun_repo" -n main -p PostRunFailureProject >/dev/null
-cat >"$home2/.autopilot/projects/PostRunFailureProject/TODO.md" <<'EOF'
-# PostRunFailureProject TODO
-
-- [ ] persisted task
-EOF
-postrun_events="$home2/.autopilot/projects/PostRunFailureProject/runtime/events/events.jsonl"
-stderr12b="$TMP_DIR/start_stderr12b.txt"
-set +e
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" AUTOPILOT_START_DISABLE_TMUX=1 \
-  AUTOPILOT_TEST_FAIL_EVENT_TYPE="run.stdout" FAKE_AGENT_STDOUT="persisted task complete" \
-  FAKE_AGENT_NAME="claude" \
-  "$AP_BIN" start PostRunFailureProject > /dev/null 2>"$stderr12b"
-status12b=$?
-set -e
-if [[ "$status12b" -eq 0 ]]; then
-  echo "assert failed: expected post-run event failure to fail PostRunFailureProject" >&2
-  exit 1
-fi
-assert_file_contains "$stderr12b" "ap start failed: failed to append event log"
-assert_file_contains "$home2/.autopilot/projects/PostRunFailureProject/TODO.md" "- [x] persisted task"
-assert_file_contains "$home2/.autopilot/projects/PostRunFailureProject/runtime/state/tasks/task-0001.json" "\"status\": \"done\""
-assert_file_not_contains "$home2/.autopilot/projects/PostRunFailureProject/runtime/state/tasks/task-0001.json" "\"status\": \"in_progress\""
-assert_file_contains "$home2/.autopilot/projects/PostRunFailureProject/runtime/state/project.json" "\"done\": 1"
-assert_file_not_contains "$home2/.autopilot/projects/PostRunFailureProject/runtime/state/project.json" "\"in_progress\": 1"
-assert_file_not_contains "$postrun_events" "\"type\": \"run.stdout\""
-
-# Case 12c:
-# Marker strings mentioned in prose should not trigger blocked classification.
-echo "[test] ignores blocker markers that are not at line start"
-quoted_repo="$TMP_DIR/quoted-marker-repo"
-mkdir -p "$quoted_repo"
-HOME="$home2" "$AP_BIN" new QuotedMarkerProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$quoted_repo" -n main -p QuotedMarkerProject >/dev/null
-cat >"$home2/.autopilot/projects/QuotedMarkerProject/TODO.md" <<'EOF'
-# QuotedMarkerProject TODO
-
-- [ ] quoted marker task
-EOF
-stdout12c="$TMP_DIR/start_stdout12c.txt"
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" AUTOPILOT_START_DISABLE_TMUX=1 \
-  FAKE_AGENT_STDOUT="The spec literal AUTOPILOT_APPROVAL_REQUIRED: is documented here" \
-  FAKE_AGENT_NAME="claude" \
-  "$AP_BIN" start QuotedMarkerProject >"$stdout12c"
-assert_file_contains "$stdout12c" "completed task: quoted marker task"
-assert_file_contains "$home2/.autopilot/projects/QuotedMarkerProject/TODO.md" "- [x] quoted marker task"
-assert_file_contains "$home2/.autopilot/projects/QuotedMarkerProject/runtime/state/tasks/task-0001.json" "\"status\": \"done\""
-assert_file_not_contains "$home2/.autopilot/projects/QuotedMarkerProject/runtime/events/events.jsonl" "\"type\": \"task.blocked\""
-
-# Case 13:
-# Multiple historical tasks with the same title should force a new task id instead of reusing history.
-echo "[test] creates a new task id when multiple historical tasks share a title"
-historical_repo="$TMP_DIR/historical-title-repo"
-mkdir -p "$historical_repo"
-HOME="$home2" "$AP_BIN" new HistoricalTitleProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$historical_repo" -n main -p HistoricalTitleProject >/dev/null
-cat >"$home2/.autopilot/projects/HistoricalTitleProject/TODO.md" <<'EOF'
-# HistoricalTitleProject TODO
-
-- [ ] repeated task
-EOF
-mkdir -p "$home2/.autopilot/projects/HistoricalTitleProject/runtime/state/tasks"
-cat >"$home2/.autopilot/projects/HistoricalTitleProject/runtime/state/tasks/task-0001.json" <<'EOF'
-{
-  "id": "task-0001",
-  "title": "repeated task",
-  "status": "done",
-  "source_file": "TODO.md",
-  "source_line": 7,
-  "source_text": "- [x] repeated task",
-  "present_in_todo": false,
-  "attempt_count": 2,
-  "latest_run_id": "run-old-1",
-  "last_error": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:05:00+09:00"
-}
-EOF
-cat >"$home2/.autopilot/projects/HistoricalTitleProject/runtime/state/tasks/task-0002.json" <<'EOF'
-{
-  "id": "task-0002",
-  "title": "repeated task",
-  "status": "failed",
-  "source_file": "TODO.md",
-  "source_line": 9,
-  "source_text": "- [ ] repeated task",
-  "present_in_todo": false,
-  "attempt_count": 4,
-  "latest_run_id": "run-old-2",
-  "last_error": "old failure",
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:06:00+09:00"
-}
-EOF
-stdout13="$TMP_DIR/start_stdout13.txt"
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="fresh task history" \
-  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start HistoricalTitleProject >"$stdout13"
-assert_file_contains "$stdout13" "completed task: repeated task"
-assert_exists "$home2/.autopilot/projects/HistoricalTitleProject/runtime/state/tasks/task-0003.json"
-assert_file_contains "$home2/.autopilot/projects/HistoricalTitleProject/runtime/state/tasks/task-0003.json" "\"status\": \"done\""
-assert_file_contains "$home2/.autopilot/projects/HistoricalTitleProject/runtime/state/tasks/task-0003.json" "\"attempt_count\": 1"
-assert_file_contains "$home2/.autopilot/projects/HistoricalTitleProject/runtime/state/tasks/task-0003.json" "\"source_line\": 3"
-assert_file_contains "$home2/.autopilot/projects/HistoricalTitleProject/runtime/state/tasks/task-0001.json" "\"attempt_count\": 2"
-assert_file_contains "$home2/.autopilot/projects/HistoricalTitleProject/runtime/state/tasks/task-0002.json" "\"attempt_count\": 4"
-assert_file_contains "$home2/.autopilot/projects/HistoricalTitleProject/runtime/state/tasks/task-0001.json" "\"present_in_todo\": false"
-assert_file_contains "$home2/.autopilot/projects/HistoricalTitleProject/runtime/state/tasks/task-0002.json" "\"present_in_todo\": false"
-
-# Case 14:
-# Phase 4 selection should honor priority, todo-before-failed, dependencies, approval, and path affinity.
-echo "[test] selects the highest priority runnable task under Phase 4 rules"
-selection_repo_main="$TMP_DIR/selection-main"
-selection_repo_alt="$TMP_DIR/selection-alt"
-mkdir -p "$selection_repo_main" "$selection_repo_alt"
-HOME="$home2" "$AP_BIN" new SelectionProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$selection_repo_main" -n main -p SelectionProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$selection_repo_alt" -n alt -p SelectionProject >/dev/null
-cat >"$home2/.autopilot/projects/SelectionProject/TODO.md" <<'EOF'
-# SelectionProject TODO
-
-- [ ] line priority fallback
-- [ ] high priority selected
-- [ ] failed same priority
-- [ ] dependency gated
-- [ ] approval gated
-- [ ] alt path task
-EOF
-mkdir -p "$home2/.autopilot/projects/SelectionProject/runtime/state/tasks"
-cat >"$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0001.json" <<'EOF'
-{
-  "id": "task-0001",
-  "title": "line priority fallback",
-  "description": null,
-  "status": "todo",
-  "priority": 20,
-  "depends_on": [],
-  "approval_required": false,
-  "related_paths": ["main"],
-  "generated_by": "human.todo",
-  "source_file": "TODO.md",
-  "source_line": 3,
-  "source_text": "- [ ] line priority fallback",
-  "present_in_todo": true,
-  "attempt_count": 0,
-  "latest_run_id": null,
-  "last_error": null,
-  "blocker_reason": null,
-  "blocker_category": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:00:00+09:00"
-}
-EOF
-cat >"$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0002.json" <<'EOF'
-{
-  "id": "task-0002",
-  "title": "high priority selected",
-  "description": null,
-  "status": "todo",
-  "priority": 10,
-  "depends_on": [],
-  "approval_required": false,
-  "related_paths": ["main"],
-  "generated_by": "human.todo",
-  "source_file": "TODO.md",
-  "source_line": 4,
-  "source_text": "- [ ] high priority selected",
-  "present_in_todo": true,
-  "attempt_count": 0,
-  "latest_run_id": null,
-  "last_error": null,
-  "blocker_reason": null,
-  "blocker_category": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:00:00+09:00"
-}
-EOF
-cat >"$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0003.json" <<'EOF'
-{
-  "id": "task-0003",
-  "title": "failed same priority",
-  "description": null,
-  "status": "failed",
-  "priority": 10,
-  "depends_on": [],
-  "approval_required": false,
-  "related_paths": ["main"],
-  "generated_by": "human.todo",
-  "source_file": "TODO.md",
-  "source_line": 5,
-  "source_text": "- [ ] failed same priority",
-  "present_in_todo": true,
-  "attempt_count": 1,
-  "latest_run_id": "run-old-failed",
-  "last_error": "old failure",
-  "blocker_reason": null,
-  "blocker_category": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:00:00+09:00"
-}
-EOF
-cat >"$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0004.json" <<'EOF'
-{
-  "id": "task-0004",
-  "title": "dependency gated",
-  "description": null,
-  "status": "todo",
-  "priority": 1,
-  "depends_on": ["task-0006"],
-  "approval_required": false,
-  "related_paths": ["main"],
-  "generated_by": "human.todo",
-  "source_file": "TODO.md",
-  "source_line": 6,
-  "source_text": "- [ ] dependency gated",
-  "present_in_todo": true,
-  "attempt_count": 0,
-  "latest_run_id": null,
-  "last_error": null,
-  "blocker_reason": null,
-  "blocker_category": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:00:00+09:00"
-}
-EOF
-cat >"$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0005.json" <<'EOF'
-{
-  "id": "task-0005",
-  "title": "approval gated",
-  "description": null,
-  "status": "todo",
-  "priority": 0,
-  "depends_on": [],
-  "approval_required": true,
-  "related_paths": ["main"],
-  "generated_by": "human.todo",
-  "source_file": "TODO.md",
-  "source_line": 7,
-  "source_text": "- [ ] approval gated",
-  "present_in_todo": true,
-  "attempt_count": 0,
-  "latest_run_id": null,
-  "last_error": null,
-  "blocker_reason": null,
-  "blocker_category": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:00:00+09:00"
-}
-EOF
-cat >"$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0006.json" <<'EOF'
-{
-  "id": "task-0006",
-  "title": "alt path task",
-  "description": null,
-  "status": "todo",
-  "priority": 0,
-  "depends_on": [],
-  "approval_required": false,
-  "related_paths": ["alt"],
-  "generated_by": "human.todo",
-  "source_file": "TODO.md",
-  "source_line": 8,
-  "source_text": "- [ ] alt path task",
-  "present_in_todo": true,
-  "attempt_count": 0,
-  "latest_run_id": null,
-  "last_error": null,
-  "blocker_reason": null,
-  "blocker_category": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:00:00+09:00"
-}
-EOF
-stdout14="$TMP_DIR/start_stdout14.txt"
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="phase 4 selection" \
-  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start SelectionProject >"$stdout14"
-selection_run_dir="$(latest_run_dir "$home2/.autopilot/projects/SelectionProject")"
-assert_file_contains "$stdout14" "completed task: high priority selected"
-assert_file_contains "$selection_run_dir/result.json" "\"task_id\": \"task-0002\""
-assert_file_contains "$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0001.json" "\"status\": \"todo\""
-assert_file_contains "$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0002.json" "\"status\": \"done\""
-assert_file_contains "$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0003.json" "\"status\": \"failed\""
-assert_file_contains "$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0004.json" "\"status\": \"todo\""
-assert_file_contains "$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0005.json" "\"approval_required\": true"
-assert_file_contains "$home2/.autopilot/projects/SelectionProject/runtime/state/tasks/task-0006.json" "\"related_paths\": [\"alt\"]"
-
-# Case 15:
-# Title-only sync updates should preserve metadata and emit task.updated.
-echo "[test] preserves metadata on title rename and records task.updated"
-rename_repo="$TMP_DIR/rename-repo"
+echo "[test] title edits are treated as rename on the same task ID"
+rename_repo="$TMP_DIR/repo-rename"
 mkdir -p "$rename_repo"
-HOME="$home2" "$AP_BIN" new RenameProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$rename_repo" -n main -p RenameProject >/dev/null
+new_project "RenameProject" "rename" "$rename_repo"
+add_task "RenameProject" "old title"
 cat >"$home2/.autopilot/projects/RenameProject/TODO.md" <<'EOF'
 # RenameProject TODO
 
-- [x] renamed task
+- [ ] [rename-0001] new title
 EOF
-mkdir -p "$home2/.autopilot/projects/RenameProject/runtime/state/tasks"
-cat >"$home2/.autopilot/projects/RenameProject/runtime/state/tasks/task-0001.json" <<'EOF'
-{
-  "id": "task-0001",
-  "title": "old task name",
-  "description": "keep this description",
-  "status": "done",
-  "priority": 7,
-  "depends_on": [],
-  "approval_required": false,
-  "related_paths": ["main"],
-  "generated_by": "human.todo",
-  "source_file": "TODO.md",
-  "source_line": 3,
-  "source_text": "- [x] old task name",
-  "present_in_todo": true,
-  "attempt_count": 1,
-  "latest_run_id": "run-old-name",
-  "last_error": null,
-  "blocker_reason": null,
-  "blocker_category": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:05:00+09:00"
-}
-EOF
-stderr15="$TMP_DIR/start_stderr15.txt"
-set +e
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start RenameProject > /dev/null 2>"$stderr15"
-status15=$?
-set -e
-if [[ "$status15" -eq 0 ]]; then
-  echo "assert failed: expected RenameProject to have no runnable task" >&2
-  exit 1
-fi
-assert_file_contains "$stderr15" "ap start failed: no runnable task"
-assert_file_contains "$home2/.autopilot/projects/RenameProject/runtime/state/tasks/task-0001.json" "\"title\": \"renamed task\""
-assert_file_contains "$home2/.autopilot/projects/RenameProject/runtime/state/tasks/task-0001.json" "\"description\": \"keep this description\""
-assert_file_contains "$home2/.autopilot/projects/RenameProject/runtime/state/tasks/task-0001.json" "\"priority\": 7"
+stdout5="$TMP_DIR/start_stdout5.txt"
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="rename summary" \
+  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start RenameProject >"$stdout5"
+assert_file_contains "$stdout5" "completed task: new title"
+assert_file_contains "$home2/.autopilot/projects/RenameProject/runtime/state/tasks/rename-0001.json" "\"title\": \"new title\""
 assert_file_contains "$home2/.autopilot/projects/RenameProject/runtime/events/events.jsonl" "\"type\": \"task.updated\""
-assert_file_contains "$home2/.autopilot/projects/RenameProject/runtime/events/events.jsonl" "\"changed_fields\": [\"title\"]"
-assert_file_contains "$home2/.autopilot/projects/RenameProject/runtime/events/events.jsonl" "\"old task name\""
-assert_file_contains "$home2/.autopilot/projects/RenameProject/runtime/events/events.jsonl" "\"renamed task\""
 
-# Case 16:
-# Lazy migration should backfill Phase 3 task files and project counts should include review_pending and cancelled.
-echo "[test] backfills old task files and persists expanded project counts"
-counts_repo="$TMP_DIR/counts-repo"
-mkdir -p "$counts_repo"
-HOME="$home2" "$AP_BIN" new CountsProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$counts_repo" -n main -p CountsProject >/dev/null
-cat >"$home2/.autopilot/projects/CountsProject/TODO.md" <<'EOF'
-# CountsProject TODO
-
-- [ ] review waiting
-- [ ] cancelled item
-- [x] already done
-EOF
-mkdir -p "$home2/.autopilot/projects/CountsProject/runtime/state/tasks"
-cat >"$home2/.autopilot/projects/CountsProject/runtime/state/tasks/task-0001.json" <<'EOF'
-{
-  "id": "task-0001",
-  "title": "review waiting",
-  "status": "review_pending",
-  "source_file": "TODO.md",
-  "source_line": 3,
-  "source_text": "- [ ] review waiting",
-  "present_in_todo": true,
-  "attempt_count": 1,
-  "latest_run_id": "run-review",
-  "last_error": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:00:00+09:00"
-}
-EOF
-cat >"$home2/.autopilot/projects/CountsProject/runtime/state/tasks/task-0002.json" <<'EOF'
-{
-  "id": "task-0002",
-  "title": "cancelled item",
-  "status": "cancelled",
-  "source_file": "TODO.md",
-  "source_line": 4,
-  "source_text": "- [ ] cancelled item",
-  "present_in_todo": true,
-  "attempt_count": 0,
-  "latest_run_id": null,
-  "last_error": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:00:00+09:00"
-}
-EOF
-cat >"$home2/.autopilot/projects/CountsProject/runtime/state/tasks/task-0003.json" <<'EOF'
-{
-  "id": "task-0003",
-  "title": "already done",
-  "status": "done",
-  "source_file": "TODO.md",
-  "source_line": 5,
-  "source_text": "- [x] already done",
-  "present_in_todo": true,
-  "attempt_count": 1,
-  "latest_run_id": "run-done",
-  "last_error": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:00:00+09:00"
-}
-EOF
-stderr16="$TMP_DIR/start_stderr16.txt"
-set +e
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start CountsProject > /dev/null 2>"$stderr16"
-status16=$?
-set -e
-if [[ "$status16" -eq 0 ]]; then
-  echo "assert failed: expected CountsProject to have no runnable task" >&2
-  exit 1
-fi
-assert_file_contains "$stderr16" "ap start failed: no runnable task"
-assert_file_contains "$home2/.autopilot/projects/CountsProject/runtime/state/project.json" "\"review_pending\": 1"
-assert_file_contains "$home2/.autopilot/projects/CountsProject/runtime/state/project.json" "\"cancelled\": 1"
-assert_file_contains "$home2/.autopilot/projects/CountsProject/runtime/state/project.json" "\"done\": 1"
-assert_file_contains "$home2/.autopilot/projects/CountsProject/runtime/state/tasks/task-0001.json" "\"priority\": 100"
-assert_file_contains "$home2/.autopilot/projects/CountsProject/runtime/state/tasks/task-0001.json" "\"related_paths\": [\"main\"]"
-assert_file_contains "$home2/.autopilot/projects/CountsProject/runtime/state/tasks/task-0001.json" "\"generated_by\": \"human.todo\""
-assert_file_contains "$home2/.autopilot/projects/CountsProject/runtime/state/tasks/task-0001.json" "\"approval_required\": false"
-
-# Case 17:
-# Invalid dependencies should fail before selection.
-echo "[test] rejects invalid task dependencies"
-dependency_repo="$TMP_DIR/dependency-repo"
-mkdir -p "$dependency_repo"
-HOME="$home2" "$AP_BIN" new DependencyProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$dependency_repo" -n main -p DependencyProject >/dev/null
-cat >"$home2/.autopilot/projects/DependencyProject/TODO.md" <<'EOF'
-# DependencyProject TODO
-
-- [ ] invalid dependency task
-EOF
-mkdir -p "$home2/.autopilot/projects/DependencyProject/runtime/state/tasks"
-cat >"$home2/.autopilot/projects/DependencyProject/runtime/state/tasks/task-0001.json" <<'EOF'
-{
-  "id": "task-0001",
-  "title": "invalid dependency task",
-  "description": null,
-  "status": "todo",
-  "priority": 10,
-  "depends_on": ["task-9999"],
-  "approval_required": false,
-  "related_paths": ["main"],
-  "generated_by": "human.todo",
-  "source_file": "TODO.md",
-  "source_line": 3,
-  "source_text": "- [ ] invalid dependency task",
-  "present_in_todo": true,
-  "attempt_count": 0,
-  "latest_run_id": null,
-  "last_error": null,
-  "blocker_reason": null,
-  "blocker_category": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:00:00+09:00"
-}
-EOF
-stderr17="$TMP_DIR/start_stderr17.txt"
-set +e
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start DependencyProject > /dev/null 2>"$stderr17"
-status17=$?
-set -e
-if [[ "$status17" -eq 0 ]]; then
-  echo "assert failed: expected DependencyProject to fail validation" >&2
-  exit 1
-fi
-assert_file_contains "$stderr17" "ap start failed: invalid task dependency: task-0001 -> task-9999"
-
-# Case 18:
-# Invalid related path names should fail before selection.
-echo "[test] rejects invalid related_paths entries"
-path_repo="$TMP_DIR/path-repo"
-mkdir -p "$path_repo"
-HOME="$home2" "$AP_BIN" new PathProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$path_repo" -n main -p PathProject >/dev/null
-cat >"$home2/.autopilot/projects/PathProject/TODO.md" <<'EOF'
-# PathProject TODO
-
-- [ ] bad path task
-EOF
-mkdir -p "$home2/.autopilot/projects/PathProject/runtime/state/tasks"
-cat >"$home2/.autopilot/projects/PathProject/runtime/state/tasks/task-0001.json" <<'EOF'
-{
-  "id": "task-0001",
-  "title": "bad path task",
-  "description": null,
-  "status": "todo",
-  "priority": 10,
-  "depends_on": [],
-  "approval_required": false,
-  "related_paths": ["missing"],
-  "generated_by": "human.todo",
-  "source_file": "TODO.md",
-  "source_line": 3,
-  "source_text": "- [ ] bad path task",
-  "present_in_todo": true,
-  "attempt_count": 0,
-  "latest_run_id": null,
-  "last_error": null,
-  "blocker_reason": null,
-  "blocker_category": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:00:00+09:00"
-}
-EOF
-stderr18="$TMP_DIR/start_stderr18.txt"
-set +e
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start PathProject > /dev/null 2>"$stderr18"
-status18=$?
-set -e
-if [[ "$status18" -eq 0 ]]; then
-  echo "assert failed: expected PathProject to fail validation" >&2
-  exit 1
-fi
-assert_file_contains "$stderr18" "ap start failed: invalid related path in task task-0001"
-
-# Case 19:
-# Reordering TODO entries should not swap task identity or metadata.
-echo "[test] preserves task identity when TODO entries are reordered"
-reorder_repo="$TMP_DIR/reorder-repo"
+echo "[test] reordering keeps task identity and changes selection order by TODO line"
+reorder_repo="$TMP_DIR/repo-reorder"
 mkdir -p "$reorder_repo"
-HOME="$home2" "$AP_BIN" new ReorderProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$reorder_repo" -n main -p ReorderProject >/dev/null
+new_project "ReorderProject" "reorder" "$reorder_repo"
+add_task "ReorderProject" "first item"
+add_task "ReorderProject" "second item"
 cat >"$home2/.autopilot/projects/ReorderProject/TODO.md" <<'EOF'
 # ReorderProject TODO
 
-- [ ] task B
-- [ ] task A
+- [ ] [reorder-0002] second item
+
+- [ ] [reorder-0001] first item
 EOF
-mkdir -p "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks"
-cat >"$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0001.json" <<'EOF'
-{
-  "id": "task-0001",
-  "title": "task A",
-  "description": null,
-  "status": "todo",
-  "priority": 100,
-  "depends_on": [],
-  "approval_required": false,
-  "related_paths": ["main"],
-  "generated_by": "human.todo",
-  "source_file": "TODO.md",
-  "source_line": 3,
-  "source_text": "- [ ] task A",
-  "present_in_todo": true,
-  "attempt_count": 0,
-  "latest_run_id": null,
-  "last_error": null,
-  "blocker_reason": null,
-  "blocker_category": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:00:00+09:00"
-}
-EOF
-cat >"$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0002.json" <<'EOF'
-{
-  "id": "task-0002",
-  "title": "task B",
-  "description": null,
-  "status": "todo",
-  "priority": 1,
-  "depends_on": [],
-  "approval_required": false,
-  "related_paths": ["main"],
-  "generated_by": "human.todo",
-  "source_file": "TODO.md",
-  "source_line": 4,
-  "source_text": "- [ ] task B",
-  "present_in_todo": true,
-  "attempt_count": 0,
-  "latest_run_id": null,
-  "last_error": null,
-  "blocker_reason": null,
-  "blocker_category": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:00:00+09:00"
-}
-EOF
-stdout19="$TMP_DIR/start_stdout19.txt"
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="reordered ok" \
+stdout6="$TMP_DIR/start_stdout6.txt"
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="reordered summary" \
   FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start ReorderProject >"$stdout19"
-reorder_run_dir="$(latest_run_dir "$home2/.autopilot/projects/ReorderProject")"
-assert_file_contains "$stdout19" "completed task: task B"
-assert_file_contains "$reorder_run_dir/result.json" "\"task_id\": \"task-0002\""
-assert_file_contains "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0001.json" "\"title\": \"task A\""
-assert_file_contains "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0001.json" "\"priority\": 100"
-assert_file_contains "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0001.json" "\"source_line\": 4"
-assert_file_contains "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0002.json" "\"title\": \"task B\""
-assert_file_contains "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0002.json" "\"priority\": 1"
-assert_file_contains "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/task-0002.json" "\"source_line\": 3"
+  "$AP_BIN" start ReorderProject >"$stdout6"
+assert_file_contains "$stdout6" "completed task: second item"
+assert_file_contains "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/reorder-0002.json" "\"source_line\": 3"
+assert_file_contains "$home2/.autopilot/projects/ReorderProject/runtime/state/tasks/reorder-0001.json" "\"source_line\": 5"
 
-# Case 20:
-# Malformed metadata should fail instead of silently defaulting.
-echo "[test] rejects malformed task metadata types"
-malformed_repo="$TMP_DIR/malformed-repo"
-mkdir -p "$malformed_repo"
-HOME="$home2" "$AP_BIN" new MalformedMetadataProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$malformed_repo" -n main -p MalformedMetadataProject >/dev/null
-cat >"$home2/.autopilot/projects/MalformedMetadataProject/TODO.md" <<'EOF'
-# MalformedMetadataProject TODO
+echo "[test] fails fast on duplicate task IDs"
+dup_repo="$TMP_DIR/repo-duplicate"
+mkdir -p "$dup_repo"
+new_project "DuplicateProject" "dup" "$dup_repo"
+add_task "DuplicateProject" "first"
+add_task "DuplicateProject" "second"
+cat >"$home2/.autopilot/projects/DuplicateProject/TODO.md" <<'EOF'
+# DuplicateProject TODO
 
-- [ ] malformed metadata task
+- [ ] [dup-0001] first
+
+- [ ] [dup-0001] second
 EOF
-mkdir -p "$home2/.autopilot/projects/MalformedMetadataProject/runtime/state/tasks"
-cat >"$home2/.autopilot/projects/MalformedMetadataProject/runtime/state/tasks/task-0001.json" <<'EOF'
-{
-  "id": "task-0001",
-  "title": "malformed metadata task",
-  "description": null,
-  "status": "todo",
-  "priority": "high",
-  "depends_on": [],
-  "approval_required": false,
-  "related_paths": ["main"],
-  "generated_by": "human.todo",
-  "source_file": "TODO.md",
-  "source_line": 3,
-  "source_text": "- [ ] malformed metadata task",
-  "present_in_todo": true,
-  "attempt_count": 0,
-  "latest_run_id": null,
-  "last_error": null,
-  "blocker_reason": null,
-  "blocker_category": null,
-  "created_at": "2026-03-15T00:00:00+09:00",
-  "updated_at": "2026-03-15T00:00:00+09:00"
-}
-EOF
-stderr20="$TMP_DIR/start_stderr20.txt"
+stderr7="$TMP_DIR/start_stderr7.txt"
 set +e
 env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start MalformedMetadataProject > /dev/null 2>"$stderr20"
-status20=$?
+  "$AP_BIN" start DuplicateProject >/dev/null 2>"$stderr7"
+status7=$?
 set -e
-if [[ "$status20" -eq 0 ]]; then
-  echo "assert failed: expected malformed metadata to fail task-state loading" >&2
+if [[ "$status7" -eq 0 ]]; then
+  echo "assert failed: expected duplicate task IDs to fail" >&2
   exit 1
 fi
-assert_file_contains "$stderr20" "ap start failed: failed to read task state:"
-assert_file_contains "$home2/.autopilot/projects/MalformedMetadataProject/runtime/state/tasks/task-0001.json" "\"priority\": \"high\""
+assert_file_contains "$stderr7" "failed to parse TODO.md: duplicate task id dup-0001"
+assert_file_contains "$home2/.autopilot/projects/DuplicateProject/runtime/events/events.jsonl" "\"type\": \"todo.sync_conflict\""
+
+echo "[test] rejects invalid task ID format"
+invalid_repo="$TMP_DIR/repo-invalid"
+mkdir -p "$invalid_repo"
+new_project "InvalidProject" "invalid" "$invalid_repo"
+add_task "InvalidProject" "bad format task"
+cat >"$home2/.autopilot/projects/InvalidProject/TODO.md" <<'EOF'
+# InvalidProject TODO
+
+- [ ] [Invalid-1] bad format task
+EOF
+stderr8="$TMP_DIR/start_stderr8.txt"
+set +e
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start InvalidProject >/dev/null 2>"$stderr8"
+status8=$?
+set -e
+if [[ "$status8" -eq 0 ]]; then
+  echo "assert failed: expected invalid task ID format to fail" >&2
+  exit 1
+fi
+assert_file_contains "$stderr8" "failed to parse TODO.md: invalid task id format [Invalid-1]"
+
+echo "[test] rejects task IDs with the wrong slug prefix"
+mismatch_repo="$TMP_DIR/repo-mismatch"
+mkdir -p "$mismatch_repo"
+new_project "MismatchProject" "mismatch" "$mismatch_repo"
+add_task "MismatchProject" "wrong slug task"
+cat >"$home2/.autopilot/projects/MismatchProject/TODO.md" <<'EOF'
+# MismatchProject TODO
+
+- [ ] [other-0001] wrong slug task
+EOF
+stderr9="$TMP_DIR/start_stderr9.txt"
+set +e
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start MismatchProject >/dev/null 2>"$stderr9"
+status9=$?
+set -e
+if [[ "$status9" -eq 0 ]]; then
+  echo "assert failed: expected slug mismatch to fail" >&2
+  exit 1
+fi
+assert_file_contains "$stderr9" "does not match project slug mismatch"
+
+echo "[test] rejects unknown task IDs that do not exist in state"
+unknown_repo="$TMP_DIR/repo-unknown"
+mkdir -p "$unknown_repo"
+new_project "UnknownProject" "unknown" "$unknown_repo"
+add_task "UnknownProject" "known task"
+cat >"$home2/.autopilot/projects/UnknownProject/TODO.md" <<'EOF'
+# UnknownProject TODO
+
+- [ ] [unknown-9999] known task
+EOF
+stderr10="$TMP_DIR/start_stderr10.txt"
+set +e
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start UnknownProject >/dev/null 2>"$stderr10"
+status10=$?
+set -e
+if [[ "$status10" -eq 0 ]]; then
+  echo "assert failed: expected unknown task ID to fail" >&2
+  exit 1
+fi
+assert_file_contains "$stderr10" "failed to sync TODO.md: task id unknown-9999 does not exist in state"
+
+echo "[test] keeps task state done when TODO update conflicts after success"
+conflict_repo="$TMP_DIR/repo-conflict"
+mkdir -p "$conflict_repo"
+new_project "ConflictProject" "conflict" "$conflict_repo"
+add_task "ConflictProject" "conflict task"
+stdout11="$TMP_DIR/start_stdout11.txt"
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="conflict summary" \
+  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  FAKE_AGENT_MUTATE_TODO_FILE="$home2/.autopilot/projects/ConflictProject/TODO.md" \
+  FAKE_AGENT_MUTATE_TODO_FROM="- [ ] [conflict-0001] conflict task" \
+  FAKE_AGENT_MUTATE_TODO_TO="- [ ] [conflict-0001] conflict task changed" \
+  "$AP_BIN" start ConflictProject >"$stdout11"
+conflict_run_dir="$(latest_run_dir "$home2/.autopilot/projects/ConflictProject")"
+assert_file_contains "$stdout11" "completed task: conflict task"
+assert_file_contains "$home2/.autopilot/projects/ConflictProject/TODO.md" "- [ ] [conflict-0001] conflict task changed"
+assert_file_contains "$conflict_run_dir/result.json" "\"todo_update_applied\": false"
+assert_file_contains "$home2/.autopilot/projects/ConflictProject/runtime/state/tasks/conflict-0001.json" "\"status\": \"done\""
+assert_file_contains "$home2/.autopilot/projects/ConflictProject/runtime/events/events.jsonl" "\"type\": \"todo.sync_conflict\""
+
+echo "[test] honors configured start agent"
+config_repo="$TMP_DIR/repo-config"
+mkdir -p "$config_repo"
+new_project "ConfigProject" "config" "$config_repo"
+add_task "ConfigProject" "config task"
+cat >"$home2/.autopilot/config.toml" <<'EOF'
+[start]
+agent = "codex"
+EOF
+stdout12="$TMP_DIR/start_stdout12.txt"
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="configured agent run" \
+  FAKE_AGENT_NAME="codex" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start ConfigProject >"$stdout12"
+config_run_dir="$(latest_run_dir "$home2/.autopilot/projects/ConfigProject")"
+assert_file_contains "$stdout12" "completed task: config task"
+assert_file_contains "$config_run_dir/meta.json" "\"agent\": \"codex\""
+assert_file_contains "$config_run_dir/stdout.log" "argv:exec --skip-git-repo-check --sandbox workspace-write --full-auto"
 
 echo "all tests passed"

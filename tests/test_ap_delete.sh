@@ -99,8 +99,8 @@ fi
 assert_file_contains "$stderr2" "project not found"
 
 # Prepare projects for delete scenarios.
-HOME="$home2" "$AP_BIN" new KeepMe >/dev/null
-HOME="$home2" "$AP_BIN" new DeleteMe >/dev/null
+HOME="$home2" "$AP_BIN" new KeepMe keep-me >/dev/null
+HOME="$home2" "$AP_BIN" new DeleteMe delete-me >/dev/null
 projects_file="$home2/.autopilot/projects.yaml"
 assert_project_exists "$projects_file" "KeepMe"
 assert_project_exists "$projects_file" "DeleteMe"
@@ -136,7 +136,7 @@ assert_project_exists "$projects_file" "KeepMe"
 echo "[test] supports interactive project selection"
 home3="$TMP_DIR/home3"
 mkdir -p "$home3/.autopilot"
-HOME="$home3" "$AP_BIN" new InteractiveDel >/dev/null
+HOME="$home3" "$AP_BIN" new InteractiveDel interactive-del >/dev/null
 projects_file3="$home3/.autopilot/projects.yaml"
 stdout5="$TMP_DIR/delete_stdout5.txt"
 printf '1\ny\n' | HOME="$home3" "$AP_BIN" delete >"$stdout5"

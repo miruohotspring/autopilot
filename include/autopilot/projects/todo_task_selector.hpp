@@ -6,13 +6,16 @@
 #include <vector>
 
 struct TodoTaskSelection {
+  std::string task_id;
   std::string title;
   std::size_t source_line;
   std::string original_line_text;
   bool completed;
 };
 
-std::vector<TodoTaskSelection> list_todo_tasks(const std::filesystem::path& todo_file);
-std::optional<TodoTaskSelection> select_first_todo_task(const std::filesystem::path& todo_file);
+std::vector<TodoTaskSelection> list_todo_tasks(
+    const std::filesystem::path& todo_file, const std::string& project_slug);
+std::optional<TodoTaskSelection> select_first_todo_task(
+    const std::filesystem::path& todo_file, const std::string& project_slug);
 bool mark_todo_task_done(
     const std::filesystem::path& todo_file, const TodoTaskSelection& selection);

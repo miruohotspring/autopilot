@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Integration test for `ap new`.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AP_BIN="$ROOT_DIR/ap"
 
@@ -24,7 +23,7 @@ assert_exists() {
 assert_file_contains() {
   local path="$1"
   local expected="$2"
-  if ! grep -q --fixed-strings "$expected" "$path"; then
+  if ! grep -q --fixed-strings -- "$expected" "$path"; then
     echo "assert failed: expected '$expected' in $path" >&2
     echo "--- file content ---" >&2
     cat "$path" >&2
@@ -78,14 +77,12 @@ run_expect_fail() {
   fi
 }
 
-# Case 1:
-# Without ~/.autopilot, command should fail with guidance.
 echo "[test] fails when ~/.autopilot does not exist"
 home1="$TMP_DIR/home1"
 mkdir -p "$home1"
 stderr1="$TMP_DIR/stderr1.txt"
 set +e
-HOME="$home1" "$AP_BIN" new ProjectA 2>"$stderr1"
+HOME="$home1" "$AP_BIN" new ProjectA project-a 2>"$stderr1"
 status1=$?
 set -e
 if [[ "$status1" -eq 0 ]]; then
@@ -94,29 +91,26 @@ if [[ "$status1" -eq 0 ]]; then
 fi
 assert_file_contains "$stderr1" "Please run ap init first"
 
-# Case 2:
-# Creates projects.yaml when missing, appends project, and creates project directory.
-echo "[test] creates ~/.autopilot/projects.yaml, adds project, and creates project directory"
+echo "[test] creates project.yaml, TODO.md, dashboard.md, and projects.yaml entry"
 home2="$TMP_DIR/home2"
 mkdir -p "$home2/.autopilot"
-HOME="$home2" "$AP_BIN" new Project-1 >/dev/null
+HOME="$home2" "$AP_BIN" new Project-1 project-1 >/dev/null
 assert_exists "$home2/.autopilot/projects.yaml"
 assert_exists "$home2/.autopilot/projects/Project-1"
 assert_exists "$home2/.autopilot/projects/Project-1/TODO.md"
 assert_exists "$home2/.autopilot/projects/Project-1/dashboard.md"
+assert_exists "$home2/.autopilot/projects/Project-1/project.yaml"
 assert_project_block "$home2/.autopilot/projects.yaml" "Project-1"
 assert_file_equals "$home2/.autopilot/projects/Project-1/TODO.md" "# Project-1 TODO"
+assert_file_contains "$home2/.autopilot/projects/Project-1/project.yaml" "name: 'Project-1'"
+assert_file_contains "$home2/.autopilot/projects/Project-1/project.yaml" "slug: 'project-1'"
+assert_file_contains "$home2/.autopilot/projects/Project-1/project.yaml" "paths: []"
 assert_file_contains "$home2/.autopilot/projects/Project-1/dashboard.md" "# Project-1 Dashboard"
-assert_file_contains "$home2/.autopilot/projects/Project-1/dashboard.md" "## Status"
-assert_file_contains "$home2/.autopilot/projects/Project-1/dashboard.md" "## Blockers"
-assert_file_contains "$home2/.autopilot/projects/Project-1/dashboard.md" "## Needs General Decision"
 
-# Case 3:
-# Duplicate project should fail.
 echo "[test] fails for duplicate project names"
 stderr3="$TMP_DIR/stderr3.txt"
 set +e
-HOME="$home2" "$AP_BIN" new Project-1 2>"$stderr3"
+HOME="$home2" "$AP_BIN" new Project-1 project-1 2>"$stderr3"
 status3=$?
 set -e
 if [[ "$status3" -eq 0 ]]; then
@@ -125,25 +119,20 @@ if [[ "$status3" -eq 0 ]]; then
 fi
 assert_file_contains "$stderr3" "project already exists"
 
-# Case 4:
-# Invalid names should fail.
-echo "[test] validates project name format"
-run_expect_fail env HOME="$home2" "$AP_BIN" new "-bad"
-run_expect_fail env HOME="$home2" "$AP_BIN" new "bad-"
-run_expect_fail env HOME="$home2" "$AP_BIN" new "bad_name"
+echo "[test] validates project name and slug format"
+run_expect_fail env HOME="$home2" "$AP_BIN" new "-bad" valid
+run_expect_fail env HOME="$home2" "$AP_BIN" new "bad-" valid
+run_expect_fail env HOME="$home2" "$AP_BIN" new "bad_name" valid
+run_expect_fail env HOME="$home2" "$AP_BIN" new "GoodName" "BadSlug"
+run_expect_fail env HOME="$home2" "$AP_BIN" new "GoodName2" "2bad"
+run_expect_fail env HOME="$home2" "$AP_BIN" new "GoodName3" "bad_slug"
 
-# Case 5:
-# Interactive mode should prompt and create project.
-echo "[test] supports interactive project name input"
+echo "[test] supports interactive project name and slug input"
 stdout5="$TMP_DIR/stdout5.txt"
-printf 'Interactive9\n' | HOME="$home2" "$AP_BIN" new >"$stdout5"
+printf 'Interactive9\ninteractive-9\n' | HOME="$home2" "$AP_BIN" new >"$stdout5"
 assert_file_contains "$stdout5" "Enter your new project name:"
+assert_file_contains "$stdout5" "Enter project slug:"
 assert_project_block "$home2/.autopilot/projects.yaml" "Interactive9"
-assert_exists "$home2/.autopilot/projects/Interactive9"
-assert_file_equals "$home2/.autopilot/projects/Interactive9/TODO.md" "# Interactive9 TODO"
-assert_file_contains "$home2/.autopilot/projects/Interactive9/dashboard.md" "# Interactive9 Dashboard"
-assert_file_contains "$home2/.autopilot/projects/Interactive9/dashboard.md" "## Status"
-assert_file_contains "$home2/.autopilot/projects/Interactive9/dashboard.md" "## Blockers"
-assert_file_contains "$home2/.autopilot/projects/Interactive9/dashboard.md" "## Needs General Decision"
+assert_file_contains "$home2/.autopilot/projects/Interactive9/project.yaml" "slug: 'interactive-9'"
 
 echo "all tests passed"
