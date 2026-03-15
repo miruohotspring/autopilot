@@ -85,7 +85,8 @@ std::string build_project_state_json(const ProjectState& project) {
   oss << "    \"todo\": " << project.task_counts.todo << ",\n";
   oss << "    \"in_progress\": " << project.task_counts.in_progress << ",\n";
   oss << "    \"done\": " << project.task_counts.done << ",\n";
-  oss << "    \"failed\": " << project.task_counts.failed << "\n";
+  oss << "    \"failed\": " << project.task_counts.failed << ",\n";
+  oss << "    \"blocked\": " << project.task_counts.blocked << "\n";
   oss << "  },\n";
   oss << "  \"updated_at\": " << json_string(project.updated_at) << "\n";
   oss << "}\n";
@@ -130,6 +131,8 @@ std::optional<ProjectState> load_project_state(const fs::path& project_file) {
       static_cast<int>(json_read_required_integer(json, "in_progress"));
   project.task_counts.done = static_cast<int>(json_read_required_integer(json, "done"));
   project.task_counts.failed = static_cast<int>(json_read_required_integer(json, "failed"));
+  project.task_counts.blocked =
+      static_cast<int>(json_read_optional_integer(json, "blocked").value_or(0));
   project.updated_at = json_read_required_string(json, "updated_at");
   return project;
 }
@@ -183,6 +186,8 @@ ProjectTaskCounts compute_project_task_counts(const std::vector<TaskState>& task
       ++counts.done;
     } else if (task.status == "failed") {
       ++counts.failed;
+    } else if (task.status == "blocked") {
+      ++counts.blocked;
     }
   }
   return counts;

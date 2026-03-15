@@ -158,3 +158,11 @@ long long json_read_required_integer(const std::string& json, const std::string&
   }
   return std::stoll((*match)[1].str());
 }
+
+std::optional<long long> json_read_optional_integer(const std::string& json, const std::string& key) {
+  const std::optional<std::smatch> match = regex_search_single(json, json_integer_field_regex(key));
+  if (!match.has_value()) {
+    return std::nullopt;
+  }
+  return std::stoll((*match)[1].str());
+}

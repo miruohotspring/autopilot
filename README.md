@@ -17,6 +17,10 @@ make
 make test
 ```
 
+Current test inventory:
+
+- [docs/TEST_INVENTORY.md](docs/TEST_INVENTORY.md)
+
 ## Install
 
 ```bash

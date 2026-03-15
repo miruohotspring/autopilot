@@ -23,6 +23,14 @@ class EventLog {
   explicit EventLog(std::filesystem::path file_path);
 
   void append(const std::string& project, const EventRecord& event);
+  void append_stream_file(
+      const std::string& project,
+      const std::string& task_id,
+      const std::string& run_id,
+      const std::string& actor,
+      const std::string& stream,
+      const std::filesystem::path& log_file,
+      std::size_t chunk_size = 4096);
 
  private:
   std::filesystem::path file_path_;

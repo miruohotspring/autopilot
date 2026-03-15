@@ -261,9 +261,19 @@ assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/proj
 assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"type\": \"task.discovered\""
 assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"type\": \"task.selected\""
 assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"type\": \"run.started\""
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"type\": \"run.stdout\""
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"type\": \"run.stderr\""
 assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"type\": \"run.finished\""
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"type\": \"result.final\""
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"stream\": \"stdout\""
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"stream\": \"stderr\""
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"sequence\": 1"
 assert_file_contains "$tmux_state/tmux.log" "new-window -d -t autopilot -n start-AlphaProject-"
 assert_file_contains "$stdout3" "started task window: autopilot:start-AlphaProject-"
+assert_file_contains "$alpha_run_dir/result.json" "\"process_status\": \"succeeded\""
+assert_file_contains "$alpha_run_dir/result.json" "\"process_exit_code\": 0"
+assert_file_contains "$alpha_run_dir/result.json" "\"alert_id\": null"
+assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/events/events.jsonl" "\"actor\": \"agent.claude\""
 
 # Case 3b:
 # Tasks removed from TODO should remain in state but be excluded from selection.
@@ -315,10 +325,14 @@ failure_run_dir="$(latest_run_dir "$home2/.autopilot/projects/FailureProject")"
 failure_run_id="$(basename "$failure_run_dir")"
 assert_exists "$failure_run_dir/result.json"
 assert_file_contains "$failure_run_dir/result.json" "\"status\": \"failed\""
+assert_file_contains "$failure_run_dir/result.json" "\"process_status\": \"failed\""
+assert_file_contains "$failure_run_dir/result.json" "\"process_exit_code\": 9"
 assert_file_contains "$failure_run_dir/result.json" "\"task_id\": \"task-0001\""
 assert_file_contains "$failure_run_dir/result.json" "\"attempt_number\": 1"
 assert_file_contains "$failure_run_dir/result.json" "\"final_task_status\": \"failed\""
 assert_file_contains "$failure_run_dir/result.json" "\"todo_update_applied\": false"
+assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/events/events.jsonl" "\"type\": \"result.final\""
+assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/events/events.jsonl" "\"final_task_status\": \"failed\""
 assert_file_contains "$failure_run_dir/stdout.log" "partial log"
 assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/tasks/task-0001.json" "\"status\": \"failed\""
 assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/tasks/task-0001.json" "\"attempt_count\": 1"
@@ -344,6 +358,61 @@ assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/ta
 assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/tasks/task-0001.json" "\"latest_run_id\": \"$failure_retry_run_id\""
 assert_file_contains "$home2/.autopilot/projects/FailureProject/runtime/state/project.json" "\"done\": 1"
 assert_file_not_contains "$home2/.autopilot/projects/FailureProject/runtime/state/project.json" "\"failed\": 1"
+
+# Case 4c:
+# Blocked tasks should stay open, create alerts when approval is required, and be rerunnable.
+echo "[test] records blocked runs and creates alerts"
+blocked_repo="$TMP_DIR/blocked-repo"
+mkdir -p "$blocked_repo"
+HOME="$home2" "$AP_BIN" new BlockedProject >/dev/null
+HOME="$home2" "$AP_BIN" add "$blocked_repo" -n main -p BlockedProject >/dev/null
+cat >"$home2/.autopilot/projects/BlockedProject/TODO.md" <<'EOF'
+# BlockedProject TODO
+
+- [ ] blocked task
+EOF
+blocked_events="$home2/.autopilot/projects/BlockedProject/runtime/events/events.jsonl"
+stderr4c="$TMP_DIR/start_stderr4c.txt"
+set +e
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_STDOUT="AUTOPILOT_APPROVAL_REQUIRED: production migration approval needed" \
+  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start BlockedProject > /dev/null 2>"$stderr4c"
+status4c=$?
+set -e
+if [[ "$status4c" -eq 0 ]]; then
+  echo "assert failed: expected blocked run to return non-zero" >&2
+  exit 1
+fi
+assert_file_contains "$stderr4c" "ap start blocked: production migration approval needed"
+assert_file_contains "$home2/.autopilot/projects/BlockedProject/TODO.md" "- [ ] blocked task"
+assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"status\": \"blocked\""
+assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"last_error\": \"production migration approval needed\""
+assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/project.json" "\"blocked\": 1"
+assert_exists "$home2/.autopilot/projects/BlockedProject/runtime/alerts/alert-0001.json"
+assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/alerts/alert-0001.json" "\"type\": \"approval_required\""
+assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/alerts/alert-0001.json" "\"message\": \"production migration approval needed\""
+assert_file_contains "$blocked_events" "\"type\": \"task.blocked\""
+assert_file_contains "$blocked_events" "\"type\": \"alert.created\""
+assert_file_contains "$blocked_events" "\"type\": \"result.final\""
+assert_file_contains "$blocked_events" "\"final_task_status\": \"blocked\""
+assert_file_contains "$blocked_events" "\"alert_id\": \"alert-0001\""
+blocked_lines_before="$(wc -l <"$blocked_events")"
+sleep 1
+stdout4c_retry="$TMP_DIR/start_stdout4c_retry.txt"
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="approval received" \
+  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start BlockedProject >"$stdout4c_retry"
+blocked_lines_after="$(wc -l <"$blocked_events")"
+if (( blocked_lines_after <= blocked_lines_before )); then
+  echo "assert failed: expected blocked project event log to grow append-only" >&2
+  exit 1
+fi
+assert_file_contains "$stdout4c_retry" "completed task: blocked task"
+assert_file_contains "$home2/.autopilot/projects/BlockedProject/TODO.md" "- [x] blocked task"
+assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"status\": \"done\""
+assert_file_contains "$home2/.autopilot/projects/BlockedProject/runtime/state/tasks/task-0001.json" "\"attempt_count\": 2"
+assert_file_contains "$blocked_events" "\"from\": \"blocked\", \"to\": \"in_progress\""
 
 
 # Case 5:
@@ -617,6 +686,61 @@ assert_file_contains "$home2/.autopilot/projects/RollbackProject/TODO.md" "- [x]
 assert_file_contains "$home2/.autopilot/projects/RollbackProject/runtime/state/tasks/task-0001.json" "\"status\": \"done\""
 assert_file_contains "$home2/.autopilot/projects/RollbackProject/runtime/state/tasks/task-0001.json" "\"attempt_count\": 2"
 assert_file_contains "$home2/.autopilot/projects/RollbackProject/runtime/events/events.jsonl" "\"from\": \"in_progress\", \"to\": \"failed\""
+
+# Case 12b:
+# Post-run event failures should not leave the task stuck in_progress.
+echo "[test] does not leave completed runs stuck in_progress when post-run replay fails"
+postrun_repo="$TMP_DIR/postrun-repo"
+mkdir -p "$postrun_repo"
+HOME="$home2" "$AP_BIN" new PostRunFailureProject >/dev/null
+HOME="$home2" "$AP_BIN" add "$postrun_repo" -n main -p PostRunFailureProject >/dev/null
+cat >"$home2/.autopilot/projects/PostRunFailureProject/TODO.md" <<'EOF'
+# PostRunFailureProject TODO
+
+- [ ] persisted task
+EOF
+postrun_events="$home2/.autopilot/projects/PostRunFailureProject/runtime/events/events.jsonl"
+stderr12b="$TMP_DIR/start_stderr12b.txt"
+set +e
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" AUTOPILOT_START_DISABLE_TMUX=1 \
+  AUTOPILOT_TEST_FAIL_EVENT_TYPE="run.stdout" FAKE_AGENT_STDOUT="persisted task complete" \
+  FAKE_AGENT_NAME="claude" \
+  "$AP_BIN" start PostRunFailureProject > /dev/null 2>"$stderr12b"
+status12b=$?
+set -e
+if [[ "$status12b" -eq 0 ]]; then
+  echo "assert failed: expected post-run event failure to fail PostRunFailureProject" >&2
+  exit 1
+fi
+assert_file_contains "$stderr12b" "ap start failed: failed to append event log"
+assert_file_contains "$home2/.autopilot/projects/PostRunFailureProject/TODO.md" "- [x] persisted task"
+assert_file_contains "$home2/.autopilot/projects/PostRunFailureProject/runtime/state/tasks/task-0001.json" "\"status\": \"done\""
+assert_file_not_contains "$home2/.autopilot/projects/PostRunFailureProject/runtime/state/tasks/task-0001.json" "\"status\": \"in_progress\""
+assert_file_contains "$home2/.autopilot/projects/PostRunFailureProject/runtime/state/project.json" "\"done\": 1"
+assert_file_not_contains "$home2/.autopilot/projects/PostRunFailureProject/runtime/state/project.json" "\"in_progress\": 1"
+assert_file_not_contains "$postrun_events" "\"type\": \"run.stdout\""
+
+# Case 12c:
+# Marker strings mentioned in prose should not trigger blocked classification.
+echo "[test] ignores blocker markers that are not at line start"
+quoted_repo="$TMP_DIR/quoted-marker-repo"
+mkdir -p "$quoted_repo"
+HOME="$home2" "$AP_BIN" new QuotedMarkerProject >/dev/null
+HOME="$home2" "$AP_BIN" add "$quoted_repo" -n main -p QuotedMarkerProject >/dev/null
+cat >"$home2/.autopilot/projects/QuotedMarkerProject/TODO.md" <<'EOF'
+# QuotedMarkerProject TODO
+
+- [ ] quoted marker task
+EOF
+stdout12c="$TMP_DIR/start_stdout12c.txt"
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" AUTOPILOT_START_DISABLE_TMUX=1 \
+  FAKE_AGENT_STDOUT="The spec literal AUTOPILOT_APPROVAL_REQUIRED: is documented here" \
+  FAKE_AGENT_NAME="claude" \
+  "$AP_BIN" start QuotedMarkerProject >"$stdout12c"
+assert_file_contains "$stdout12c" "completed task: quoted marker task"
+assert_file_contains "$home2/.autopilot/projects/QuotedMarkerProject/TODO.md" "- [x] quoted marker task"
+assert_file_contains "$home2/.autopilot/projects/QuotedMarkerProject/runtime/state/tasks/task-0001.json" "\"status\": \"done\""
+assert_file_not_contains "$home2/.autopilot/projects/QuotedMarkerProject/runtime/events/events.jsonl" "\"type\": \"task.blocked\""
 
 # Case 13:
 # Multiple historical tasks with the same title should force a new task id instead of reusing history.

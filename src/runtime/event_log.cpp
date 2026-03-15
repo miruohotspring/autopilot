@@ -7,6 +7,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -113,5 +114,46 @@ void EventLog::append(const std::string& project, const EventRecord& event) {
 
   if (!out) {
     throw std::runtime_error("failed to append event log");
+  }
+}
+
+void EventLog::append_stream_file(
+    const std::string& project,
+    const std::string& task_id,
+    const std::string& run_id,
+    const std::string& actor,
+    const std::string& stream,
+    const fs::path& log_file,
+    const std::size_t chunk_size) {
+  std::ifstream in(log_file, std::ios::binary);
+  if (!in) {
+    throw std::runtime_error("failed to replay run " + stream + " events");
+  }
+
+  std::size_t sequence = 1;
+  while (true) {
+    std::string chunk(chunk_size, '\0');
+    in.read(&chunk[0], static_cast<std::streamsize>(chunk_size));
+    const std::streamsize read_size = in.gcount();
+    if (read_size <= 0) {
+      break;
+    }
+    chunk.resize(static_cast<std::size_t>(read_size));
+
+    const bool truncated = in.peek() != std::char_traits<char>::eof();
+    append(
+        project,
+        EventRecord{
+            task_id,
+            run_id,
+            stream == "stdout" ? "run.stdout" : "run.stderr",
+            actor,
+            {
+                EventPayloadField{"stream", json_string(stream)},
+                EventPayloadField{"sequence", std::to_string(sequence++)},
+                EventPayloadField{"text", json_string(chunk)},
+                EventPayloadField{"truncated", truncated ? "true" : "false"},
+            },
+        });
   }
 }

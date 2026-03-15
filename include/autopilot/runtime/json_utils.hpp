@@ -12,3 +12,4 @@ std::string json_read_required_string(const std::string& json, const std::string
 std::optional<std::string> json_read_optional_string(const std::string& json, const std::string& key);
 bool json_read_required_bool(const std::string& json, const std::string& key);
 long long json_read_required_integer(const std::string& json, const std::string& key);
+std::optional<long long> json_read_optional_integer(const std::string& json, const std::string& key);

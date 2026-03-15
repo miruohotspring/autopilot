@@ -25,6 +25,7 @@ struct ProjectTaskCounts {
   int in_progress = 0;
   int done = 0;
   int failed = 0;
+  int blocked = 0;
 };
 
 struct ProjectState {

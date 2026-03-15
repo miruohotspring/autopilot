@@ -6,8 +6,10 @@
 #include "autopilot/projects/project_store.hpp"
 #include "autopilot/projects/todo_task_selector.hpp"
 #include "autopilot/projects/todo_task_sync.hpp"
+#include "autopilot/runtime/alert_store.hpp"
 #include "autopilot/runtime/event_log.hpp"
 #include "autopilot/runtime/json_utils.hpp"
+#include "autopilot/runtime/run_result_classifier.hpp"
 #include "autopilot/runtime/task_state_store.hpp"
 
 #include <algorithm>
@@ -38,7 +40,7 @@ struct SelectedProjectPath {
 
 std::string shell_quote(const std::string& s) {
   std::string quoted = "'";
-  for (char ch : s) {
+  for (const char ch : s) {
     if (ch == '\'') {
       quoted += "'\\''";
     } else {
@@ -109,22 +111,6 @@ std::string build_prompt(
   oss << "You may inspect and edit files in the working directory.\n";
   oss << "At the end, print a short summary of what you changed.\n";
   return oss.str();
-}
-
-std::string read_last_non_empty_line(const fs::path& file) {
-  std::ifstream in(file);
-  if (!in) {
-    return "";
-  }
-
-  std::string line;
-  std::string last_non_empty;
-  while (std::getline(in, line)) {
-    if (!line.empty()) {
-      last_non_empty = line;
-    }
-  }
-  return last_non_empty;
 }
 
 void write_text_file(const fs::path& path, const std::string& content) {
@@ -333,27 +319,33 @@ std::string build_result_json(
     const std::string& run_id,
     const TaskState& task,
     const int attempt_number,
-    const std::string& status,
-    const int exit_code,
+    const std::string& process_status,
+    const int process_exit_code,
     const std::string& started_at,
     const std::string& ended_at,
     const long long duration_ms,
     const bool todo_update_applied,
     const std::string& final_task_status,
-    const std::string& summary_excerpt) {
+    const std::string& summary_excerpt,
+    const std::optional<std::string>& blocker_reason,
+    const std::optional<std::string>& alert_id) {
   std::ostringstream oss;
   oss << "{\n";
   oss << "  \"run_id\": " << json_string(run_id) << ",\n";
   oss << "  \"task_id\": " << json_string(task.id) << ",\n";
   oss << "  \"attempt_number\": " << attempt_number << ",\n";
-  oss << "  \"status\": " << json_string(status) << ",\n";
-  oss << "  \"exit_code\": " << exit_code << ",\n";
+  oss << "  \"status\": " << json_string(process_status) << ",\n";
+  oss << "  \"exit_code\": " << process_exit_code << ",\n";
+  oss << "  \"process_status\": " << json_string(process_status) << ",\n";
+  oss << "  \"process_exit_code\": " << process_exit_code << ",\n";
   oss << "  \"started_at\": " << json_string(started_at) << ",\n";
   oss << "  \"ended_at\": " << json_string(ended_at) << ",\n";
   oss << "  \"duration_ms\": " << duration_ms << ",\n";
   oss << "  \"final_task_status\": " << json_string(final_task_status) << ",\n";
   oss << "  \"todo_update_applied\": " << (todo_update_applied ? "true" : "false") << ",\n";
-  oss << "  \"summary_excerpt\": " << json_string(summary_excerpt) << "\n";
+  oss << "  \"summary_excerpt\": " << json_string(summary_excerpt) << ",\n";
+  oss << "  \"blocker_reason\": " << json_nullable_string(blocker_reason) << ",\n";
+  oss << "  \"alert_id\": " << json_nullable_string(alert_id) << "\n";
   oss << "}\n";
   return oss.str();
 }
@@ -388,7 +380,7 @@ TaskState* select_runnable_task(std::vector<TaskState>& tasks) {
     if (!task.present_in_todo) {
       continue;
     }
-    if (task.status != "todo" && task.status != "failed") {
+    if (task.status != "todo" && task.status != "failed" && task.status != "blocked") {
       continue;
     }
     if (selected == nullptr || task.source_line < selected->source_line) {
@@ -453,7 +445,8 @@ void append_status_changed_event(
     const TaskState& task,
     const std::optional<std::string>& run_id,
     const std::string& from_status,
-    const std::string& to_status) {
+    const std::string& to_status,
+    const std::string& reason) {
   event_log.append(
       project_name,
       EventRecord{
@@ -464,8 +457,42 @@ void append_status_changed_event(
           {
               EventPayloadField{"from", json_string(from_status)},
               EventPayloadField{"to", json_string(to_status)},
+              EventPayloadField{"reason", json_string(reason)},
           },
       });
+}
+
+void finalize_postrun_failure(
+    const fs::path& tasks_dir,
+    const fs::path& project_state_file,
+    const std::string& project_name,
+    std::vector<TaskState>& tasks,
+    TaskState& task,
+    const std::optional<ProjectState>& previous_project_state,
+    const std::string& run_id,
+    const std::string& failure_reason,
+    const std::string& failed_at) {
+  if (task.status != "in_progress") {
+    return;
+  }
+
+  try {
+    task.status = "failed";
+    task.last_error = failure_reason;
+    task.updated_at = failed_at;
+    save_task_state(tasks_dir, task);
+    save_project_state(
+        project_state_file,
+        build_project_state(
+            project_name,
+            tasks,
+            previous_project_state,
+            std::nullopt,
+            run_id,
+            failed_at,
+            failed_at));
+  } catch (const std::exception&) {
+  }
 }
 
 std::string completed_todo_line(const std::string& line) {
@@ -496,6 +523,7 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
     const fs::path state_dir = runtime_dir / "state";
     const fs::path project_state_file = state_dir / "project.json";
     const fs::path tasks_dir = state_dir / "tasks";
+    const fs::path alerts_dir = runtime_dir / "alerts";
     const fs::path last_run_file = runtime_dir / "last_run.json";
     fs::create_directories(runs_dir);
     fs::create_directories(tasks_dir);
@@ -554,7 +582,8 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
           *changed_task,
           std::nullopt,
           change.from_status,
-          change.to_status);
+          change.to_status,
+          "todo_sync");
     }
     for (const TaskStatusChange& change : recovered_in_progress_changes) {
       TaskState* changed_task = find_task_by_id(sync_result.tasks, change.task_id);
@@ -567,7 +596,8 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
           *changed_task,
           std::nullopt,
           change.from_status,
-          change.to_status);
+          change.to_status,
+          "stale_run_recovered");
     }
 
     ProjectState project_state = build_project_state(
@@ -630,7 +660,8 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
               "task.selected",
               "ap.start",
               {
-                  EventPayloadField{"title", json_string(selected_task->title)},
+                  EventPayloadField{"reason", json_string("first_runnable_task")},
+                  EventPayloadField{"previous_status", json_string(previous_status)},
                   EventPayloadField{"source_line", std::to_string(selected_task->source_line)},
                   EventPayloadField{
                       "attempt_number",
@@ -639,7 +670,13 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
               },
           });
       append_status_changed_event(
-          event_log, project_name, *selected_task, run_id, previous_status, selected_task->status);
+          event_log,
+          project_name,
+          *selected_task,
+          run_id,
+          previous_status,
+          selected_task->status,
+          "run_started");
 
       write_text_file(prompt_file, prompt);
       write_text_file(
@@ -664,6 +701,11 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
               "ap.start",
               {
                   EventPayloadField{"agent", json_string(agent_name)},
+                  EventPayloadField{"path_name", json_string(selected_path.name)},
+                  EventPayloadField{
+                      "working_directory",
+                      json_string(selected_path.path.string()),
+                  },
                   EventPayloadField{
                       "attempt_number",
                       std::to_string(selected_task->attempt_count),
@@ -702,118 +744,255 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
       }
       throw;
     }
-    const auto ended_clock = std::chrono::steady_clock::now();
 
+    const auto ended_clock = std::chrono::steady_clock::now();
     const std::string ended_at = current_timestamp_with_offset();
     const long long duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                      ended_clock - started_clock)
                                      .count();
-    const bool succeeded = launch_result.exit_code == 0;
+    const std::string pre_final_status = selected_task->status;
+
+    RunResultClassification classification;
+    bool succeeded = false;
+    bool blocked = false;
     bool todo_update_applied = false;
-    if (succeeded) {
-      todo_update_applied = mark_todo_task_done(
-          todo_file,
-          TodoTaskSelection{
-              selected_task->title,
-              selected_task->source_line,
-              selected_task->source_text,
-              false,
+    std::optional<AlertRecord> created_alert;
+    try {
+      classification = classify_run_result(launch_result.exit_code, stdout_file, stderr_file);
+      succeeded = classification.final_task_status == "done";
+      blocked = classification.final_task_status == "blocked";
+
+      selected_task->status = classification.final_task_status;
+      selected_task->updated_at = ended_at;
+      if (classification.final_task_status == "done") {
+        selected_task->last_error = std::nullopt;
+      } else if (blocked) {
+        selected_task->last_error = classification.blocker_reason;
+      } else {
+        selected_task->last_error =
+            std::optional<std::string>("agent exited with status " +
+                                       std::to_string(launch_result.exit_code));
+      }
+      save_task_state(tasks_dir, *selected_task);
+
+      project_state = build_project_state(
+          project_name,
+          sync_result.tasks,
+          previous_project_state,
+          std::nullopt,
+          run_id,
+          ended_at,
+          ended_at);
+      save_project_state(project_state_file, project_state);
+
+      if (succeeded) {
+        todo_update_applied = mark_todo_task_done(
+            todo_file,
+            TodoTaskSelection{
+                selected_task->title,
+                selected_task->source_line,
+                selected_task->source_text,
+                false,
+            });
+        if (!todo_update_applied) {
+          event_log.append(
+              project_name,
+              EventRecord{
+                  selected_task->id,
+                  run_id,
+                  "todo.sync_conflict",
+                  "ap.start",
+                  {EventPayloadField{"message", json_string("failed to update TODO.md after run")}},
+              });
+        } else {
+          selected_task->source_text = completed_todo_line(selected_task->source_text);
+          save_task_state(tasks_dir, *selected_task);
+        }
+      }
+
+      write_text_file(
+          meta_file,
+          build_meta_json(
+              run_id,
+              project_name,
+              *selected_task,
+              selected_path,
+              launch_result.agent_name,
+              selected_task->attempt_count,
+              classification.process_status,
+              started_at,
+              ended_at,
+              launch_result.exit_code));
+
+      event_log.append_stream_file(
+          project_name,
+          selected_task->id,
+          run_id,
+          "agent." + launch_result.agent_name,
+          "stdout",
+          stdout_file);
+      event_log.append_stream_file(
+          project_name,
+          selected_task->id,
+          run_id,
+          "agent." + launch_result.agent_name,
+          "stderr",
+          stderr_file);
+
+      event_log.append(
+          project_name,
+          EventRecord{
+              selected_task->id,
+              run_id,
+              "run.finished",
+              "ap.start",
+              {
+                  EventPayloadField{"agent", json_string(launch_result.agent_name)},
+                  EventPayloadField{"exit_code", std::to_string(launch_result.exit_code)},
+                  EventPayloadField{"duration_ms", std::to_string(duration_ms)},
+              },
           });
-      if (!todo_update_applied) {
+
+      if (blocked) {
+        if (classification.alert.has_value()) {
+          AlertStore alert_store(alerts_dir);
+          created_alert = alert_store.create(
+              project_name, selected_task->id, run_id, *classification.alert, ended_at);
+        }
+
         event_log.append(
             project_name,
             EventRecord{
                 selected_task->id,
                 run_id,
-                "todo.sync_conflict",
-                "ap.start",
-                {EventPayloadField{"message", json_string("failed to update TODO.md after run")}},
-            });
-      }
-    }
-
-    const std::string summary_excerpt = read_last_non_empty_line(stdout_file);
-    const std::string run_status = succeeded ? "succeeded" : "failed";
-    const std::string final_task_status = succeeded ? "done" : "failed";
-    const std::string pre_final_status = selected_task->status;
-    selected_task->status = final_task_status;
-    selected_task->updated_at = ended_at;
-    selected_task->last_error = succeeded
-                                    ? std::nullopt
-                                    : std::optional<std::string>(
-                                          "agent exited with status " +
-                                          std::to_string(launch_result.exit_code));
-    if (todo_update_applied) {
-      selected_task->source_text = completed_todo_line(selected_task->source_text);
-    }
-    save_task_state(tasks_dir, *selected_task);
-
-    write_text_file(
-        meta_file,
-        build_meta_json(
-            run_id,
-            project_name,
-            *selected_task,
-            selected_path,
-            launch_result.agent_name,
-            selected_task->attempt_count,
-            run_status,
-            started_at,
-            ended_at,
-            launch_result.exit_code));
-    const std::string result_json = build_result_json(
-        run_id,
-        *selected_task,
-        selected_task->attempt_count,
-        run_status,
-        launch_result.exit_code,
-        started_at,
-        ended_at,
-        duration_ms,
-        todo_update_applied,
-        final_task_status,
-        summary_excerpt);
-    write_text_file(result_file, result_json);
-    write_text_file(last_run_file, result_json);
-
-    append_status_changed_event(
-        event_log,
-        project_name,
-        *selected_task,
-        run_id,
-        pre_final_status,
-        selected_task->status);
-    event_log.append(
-        project_name,
-        EventRecord{
-            selected_task->id,
-            run_id,
-            "run.finished",
-            "ap.start",
-            {
-                EventPayloadField{"status", json_string(run_status)},
-                EventPayloadField{"exit_code", std::to_string(launch_result.exit_code)},
-                EventPayloadField{
-                    "todo_update_applied",
-                    todo_update_applied ? "true" : "false",
+                "task.blocked",
+                "runtime.classifier",
+                {
+                    EventPayloadField{
+                        "reason",
+                        json_string(classification.blocker_reason.value_or("blocked")),
+                    },
+                    EventPayloadField{
+                        "category",
+                        json_string(classification.blocker_category.value_or("blocked")),
+                    },
+                    EventPayloadField{
+                        "approval_required",
+                        classification.approval_required ? "true" : "false",
+                    },
+                    EventPayloadField{
+                        "alert_id",
+                        json_nullable_string(
+                            created_alert.has_value()
+                                ? std::optional<std::string>(created_alert->id)
+                                : std::nullopt),
+                    },
                 },
-                EventPayloadField{"final_task_status", json_string(final_task_status)},
-            },
-        });
+            });
 
-    project_state = build_project_state(
-        project_name,
-        sync_result.tasks,
-        previous_project_state,
-        std::nullopt,
-        run_id,
-        ended_at,
-        ended_at);
-    save_project_state(project_state_file, project_state);
+        if (created_alert.has_value()) {
+          event_log.append(
+              project_name,
+              EventRecord{
+                  selected_task->id,
+                  run_id,
+                  "alert.created",
+                  "ap.start",
+                  {
+                      EventPayloadField{"alert_id", json_string(created_alert->id)},
+                      EventPayloadField{"severity", json_string(created_alert->severity)},
+                      EventPayloadField{"type", json_string(created_alert->type)},
+                      EventPayloadField{"message", json_string(created_alert->message)},
+                  },
+              });
+        }
+      }
+
+      const std::string result_json = build_result_json(
+          run_id,
+          *selected_task,
+          selected_task->attempt_count,
+          classification.process_status,
+          launch_result.exit_code,
+          started_at,
+          ended_at,
+          duration_ms,
+          todo_update_applied,
+          classification.final_task_status,
+          classification.summary_excerpt,
+          classification.blocker_reason,
+          created_alert.has_value() ? std::optional<std::string>(created_alert->id) : std::nullopt);
+      write_text_file(result_file, result_json);
+      write_text_file(last_run_file, result_json);
+
+      append_status_changed_event(
+          event_log,
+          project_name,
+          *selected_task,
+          run_id,
+          pre_final_status,
+          selected_task->status,
+          "result_finalized");
+      event_log.append(
+          project_name,
+          EventRecord{
+              selected_task->id,
+              run_id,
+              "result.final",
+              "runtime.classifier",
+              {
+                  EventPayloadField{
+                      "final_task_status",
+                      json_string(classification.final_task_status),
+                  },
+                  EventPayloadField{
+                      "process_exit_code",
+                      std::to_string(launch_result.exit_code),
+                  },
+                  EventPayloadField{
+                      "process_status",
+                      json_string(classification.process_status),
+                  },
+                  EventPayloadField{
+                      "summary",
+                      json_string(classification.summary_excerpt),
+                  },
+                  EventPayloadField{
+                      "todo_update_applied",
+                      todo_update_applied ? "true" : "false",
+                  },
+                  EventPayloadField{
+                      "alert_id",
+                      json_nullable_string(
+                          created_alert.has_value()
+                              ? std::optional<std::string>(created_alert->id)
+                              : std::nullopt),
+                  },
+              },
+          });
+    } catch (const std::exception& e) {
+      finalize_postrun_failure(
+          tasks_dir,
+          project_state_file,
+          project_name,
+          sync_result.tasks,
+          *selected_task,
+          previous_project_state,
+          run_id,
+          "post-run processing failed: " + std::string(e.what()),
+          current_timestamp_with_offset());
+      throw;
+    }
 
     if (succeeded) {
       std::cout << "completed task: " << selected_task->title << '\n';
       return 0;
+    }
+
+    if (blocked) {
+      std::cerr << "ap start blocked: "
+                << classification.blocker_reason.value_or("blocked by external dependency") << '\n';
+      return 1;
     }
 
     std::cerr << "ap start failed: agent exited with status " << launch_result.exit_code << '\n';
