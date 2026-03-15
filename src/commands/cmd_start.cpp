@@ -491,9 +491,6 @@ bool dependencies_are_resolved(
 }
 
 bool task_matches_selected_path(const TaskState& task, const std::string& selected_path_name) {
-  if (task.related_paths.empty()) {
-    return true;
-  }
   return std::find(task.related_paths.begin(), task.related_paths.end(), selected_path_name) !=
          task.related_paths.end();
 }
@@ -679,7 +676,7 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
       valid_path_names.insert(path_entry.name);
     }
 
-    const std::vector<TaskState> existing_tasks = load_task_states(tasks_dir, selected_path.name);
+    const std::vector<TaskState> existing_tasks = load_task_states(tasks_dir);
     const std::string synced_at = current_timestamp_with_offset();
 
     TodoSyncResult sync_result;

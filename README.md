@@ -243,6 +243,8 @@ If `-p <project_name>` is omitted, `ap` asks you to select a project.
 
 It also creates the matching runtime task state file.
 
+`ap task add` requires the target project to already have at least one managed path. If the project has no path yet, it fails with `ap task add failed: no managed path`.
+
 ## Start task
 
 ```bash
@@ -252,6 +254,8 @@ ap start [project_name]
 If `<project_name>` is omitted, `ap` asks you to select a project.
 
 `ap start` syncs the target project's `TODO.md` with runtime task state and then selects the first runnable task from state.
+
+`ap start` also requires the target project to have at least one managed path. If none exists, it fails with `ap start failed: no managed path`.
 
 Current `TODO.md` task lines must include a visible stable task ID:
 

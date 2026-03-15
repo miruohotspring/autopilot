@@ -219,19 +219,19 @@ assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/task
 assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/alpha-0001.json" "\"latest_run_id\": \"$alpha_run_id\""
 assert_file_contains "$home2/.autopilot/projects/AlphaProject/runtime/state/tasks/alpha-0002.json" "\"status\": \"todo\""
 
-echo "[test] pathless task add remains runnable after adding a non-main path"
-pathless_repo="$TMP_DIR/repo-pathless"
-mkdir -p "$pathless_repo"
+echo "[test] fails when project has no managed path"
 HOME="$home2" "$AP_BIN" new PathlessProject pathless >/dev/null
-HOME="$home2" "$AP_BIN" task add "pathless task" -p PathlessProject >/dev/null
-HOME="$home2" "$AP_BIN" add "$pathless_repo" -n src -p PathlessProject >/dev/null
-stdout3c="$TMP_DIR/start_stdout3c.txt"
-env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="pathless summary" \
-  FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
-  "$AP_BIN" start PathlessProject >"$stdout3c"
-assert_file_contains "$stdout3c" "completed task: pathless task"
-assert_file_contains "$home2/.autopilot/projects/PathlessProject/runtime/state/tasks/pathless-0001.json" "\"related_paths\": []"
-assert_file_contains "$home2/.autopilot/projects/PathlessProject/TODO.md" "- [x] [pathless-0001] pathless task"
+stderr3c="$TMP_DIR/start_stderr3c.txt"
+set +e
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start PathlessProject >/dev/null 2>"$stderr3c"
+status3c=$?
+set -e
+if [[ "$status3c" -eq 0 ]]; then
+  echo "assert failed: expected PathlessProject start to fail without a managed path" >&2
+  exit 1
+fi
+assert_file_contains "$stderr3c" "ap start failed: no managed path"
 
 echo "[test] marks tasks removed from TODO as not present"
 cat >"$home2/.autopilot/projects/AlphaProject/TODO.md" <<'EOF'

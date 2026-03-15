@@ -48,9 +48,7 @@ struct ProjectState {
   std::string updated_at;
 };
 
-std::vector<TaskState> load_task_states(
-    const std::filesystem::path& tasks_dir,
-    const std::string& default_related_path = "main");
+std::vector<TaskState> load_task_states(const std::filesystem::path& tasks_dir);
 std::optional<ProjectState> load_project_state(const std::filesystem::path& project_file);
 
 void save_task_state(const std::filesystem::path& tasks_dir, const TaskState& task);

@@ -32,9 +32,8 @@ void write_text_file(const fs::path& path, const std::string& content) {
   out << content;
 }
 
-TaskState parse_task_state_file(const fs::path& path, const std::string& default_related_path) {
+TaskState parse_task_state_file(const fs::path& path) {
   try {
-    (void)default_related_path;
     const std::string json = read_text_file(path);
     TaskState task;
     task.id = json_read_required_string(json, "id");
@@ -116,7 +115,7 @@ std::string build_project_state_json(const ProjectState& project) {
 
 } // namespace
 
-std::vector<TaskState> load_task_states(const fs::path& tasks_dir, const std::string& default_related_path) {
+std::vector<TaskState> load_task_states(const fs::path& tasks_dir) {
   std::vector<TaskState> tasks;
   if (!fs::exists(tasks_dir)) {
     return tasks;
@@ -126,7 +125,7 @@ std::vector<TaskState> load_task_states(const fs::path& tasks_dir, const std::st
     if (!entry.is_regular_file() || entry.path().extension() != ".json") {
       continue;
     }
-    tasks.push_back(parse_task_state_file(entry.path(), default_related_path));
+    tasks.push_back(parse_task_state_file(entry.path()));
   }
 
   std::sort(tasks.begin(), tasks.end(), [](const TaskState& lhs, const TaskState& rhs) {

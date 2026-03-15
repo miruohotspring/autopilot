@@ -57,10 +57,7 @@ std::vector<std::string> initial_related_paths(const std::vector<ProjectPathEntr
       return {entry.name};
     }
   }
-  if (!entries.empty()) {
-    return {entries.front().name};
-  }
-  return {};
+  return {entries.front().name};
 }
 
 std::vector<std::string> read_all_lines(const fs::path& file) {
@@ -191,6 +188,9 @@ int cmd_task_add(
 
     const std::vector<ProjectPathEntry> path_entries =
         load_project_path_entries(projects_file, project_name);
+    if (path_entries.empty()) {
+      throw std::runtime_error("no managed path");
+    }
     const fs::path tasks_dir = project_dir / "runtime" / "state" / "tasks";
     const std::vector<std::string> original_todo_lines = read_all_lines(todo_file);
     const std::vector<TodoTaskSelection> todo_tasks = list_todo_tasks(todo_file, project_config.slug);

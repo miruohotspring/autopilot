@@ -77,10 +77,28 @@ if [[ "$status1" -eq 0 ]]; then
 fi
 assert_file_contains "$stderr1" "Please run ap init first"
 
-echo "[test] adds slug-based task IDs to TODO.md and state"
+echo "[test] requires at least one managed path"
 home2="$TMP_DIR/home2"
 mkdir -p "$home2/.autopilot"
 HOME="$home2" "$AP_BIN" new Demo demo >/dev/null
+stderr2="$TMP_DIR/task_add_stderr2.txt"
+set +e
+HOME="$home2" "$AP_BIN" task add "First task" -p Demo 2>"$stderr2" >/dev/null
+status2=$?
+set -e
+if [[ "$status2" -eq 0 ]]; then
+  echo "assert failed: expected ap task add to fail when project has no managed path" >&2
+  exit 1
+fi
+assert_file_contains "$stderr2" "ap task add failed: no managed path"
+assert_file_not_contains "$home2/.autopilot/projects/Demo/TODO.md" "[demo-0001] First task"
+assert_not_exists "$home2/.autopilot/projects/Demo/runtime/state/tasks/demo-0001.json"
+
+echo "[test] adds slug-based task IDs to TODO.md and state"
+demo_repo="$TMP_DIR/repo-demo"
+other_repo="$TMP_DIR/repo-other"
+mkdir -p "$demo_repo" "$other_repo"
+HOME="$home2" "$AP_BIN" add "$demo_repo" -n main -p Demo >/dev/null
 stdout2="$TMP_DIR/task_add_stdout2.txt"
 HOME="$home2" "$AP_BIN" task add "First task" -p Demo >"$stdout2"
 assert_file_contains "$stdout2" "added task: [demo-0001] First task"
@@ -89,15 +107,17 @@ assert_exists "$home2/.autopilot/projects/Demo/runtime/state/tasks/demo-0001.jso
 assert_file_contains "$home2/.autopilot/projects/Demo/runtime/state/tasks/demo-0001.json" "\"id\": \"demo-0001\""
 assert_file_contains "$home2/.autopilot/projects/Demo/runtime/state/tasks/demo-0001.json" "\"title\": \"First task\""
 assert_file_contains "$home2/.autopilot/projects/Demo/runtime/state/tasks/demo-0001.json" "\"generated_by\": \"ap.task_add\""
-assert_file_contains "$home2/.autopilot/projects/Demo/runtime/state/tasks/demo-0001.json" "\"related_paths\": []"
+assert_file_contains "$home2/.autopilot/projects/Demo/runtime/state/tasks/demo-0001.json" "\"related_paths\": [\"main\"]"
 
 echo "[test] increments IDs and supports interactive project selection"
 HOME="$home2" "$AP_BIN" new Other other >/dev/null
+HOME="$home2" "$AP_BIN" add "$other_repo" -n src -p Other >/dev/null
 stdout3="$TMP_DIR/task_add_stdout3.txt"
 printf '2\n' | HOME="$home2" "$AP_BIN" task add "Other task" >"$stdout3"
 assert_file_contains "$stdout3" "Select project to add task:"
 assert_file_contains "$stdout3" "Enter number to add task:"
 assert_file_contains "$stdout3" "added task: [other-0001] Other task"
+assert_file_contains "$home2/.autopilot/projects/Other/runtime/state/tasks/other-0001.json" "\"related_paths\": [\"src\"]"
 HOME="$home2" "$AP_BIN" task add "Second task" -p Demo >/dev/null
 assert_file_contains "$home2/.autopilot/projects/Demo/TODO.md" "- [ ] [demo-0002] Second task"
 assert_exists "$home2/.autopilot/projects/Demo/runtime/state/tasks/demo-0002.json"
@@ -138,6 +158,9 @@ echo "[test] leaves TODO.md clean when state staging fails"
 home3="$TMP_DIR/home3"
 mkdir -p "$home3/.autopilot"
 HOME="$home3" "$AP_BIN" new Broken broken >/dev/null
+broken_repo="$TMP_DIR/repo-broken"
+mkdir -p "$broken_repo"
+HOME="$home3" "$AP_BIN" add "$broken_repo" -n main -p Broken >/dev/null
 mkdir -p "$home3/.autopilot/projects/Broken/runtime/state/tasks"
 chmod 500 "$home3/.autopilot/projects/Broken/runtime/state/tasks"
 stderr6="$TMP_DIR/task_add_stderr6.txt"
