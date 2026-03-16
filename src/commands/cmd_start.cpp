@@ -940,6 +940,7 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
     bool todo_update_applied = false;
     std::optional<AlertRecord> created_alert;
     try {
+      rewrite_stream_json_stdout_log(stdout_file, stderr_file);
       classification = classify_run_result(launch_result.exit_code, stdout_file, stderr_file);
       succeeded = classification.final_task_status == "done";
       blocked = classification.final_task_status == "blocked";

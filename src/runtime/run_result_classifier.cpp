@@ -4,6 +4,7 @@
 #include <fstream>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 namespace {
@@ -203,6 +204,44 @@ std::optional<BlockerMatch> find_blocker_marker(const std::string& contents) {
 }
 
 } // namespace
+
+void rewrite_stream_json_stdout_log(
+    const std::filesystem::path& stdout_log, const std::filesystem::path& stderr_log) {
+  std::ifstream in(stdout_log);
+  if (!in) {
+    return;
+  }
+  std::ostringstream oss;
+  oss << in.rdbuf();
+  in.close();
+  const std::string raw = oss.str();
+
+  if (!is_stream_json_content(raw)) {
+    return;
+  }
+
+  // Append raw JSON stream to stderr.log
+  {
+    std::ofstream out(stderr_log, std::ios::app);
+    if (!out) {
+      throw std::runtime_error("failed to append to stderr log: " + stderr_log.string());
+    }
+    out << raw;
+  }
+
+  // Extract result text and overwrite stdout.log
+  const std::string result_text = extract_text_from_stream_json(raw);
+  {
+    std::ofstream out(stdout_log, std::ios::trunc);
+    if (!out) {
+      throw std::runtime_error("failed to rewrite stdout log: " + stdout_log.string());
+    }
+    out << result_text;
+    if (!result_text.empty() && result_text.back() != '\n') {
+      out << '\n';
+    }
+  }
+}
 
 RunResultClassification classify_run_result(
     const int exit_code, const std::filesystem::path& stdout_log, const std::filesystem::path& stderr_log) {
