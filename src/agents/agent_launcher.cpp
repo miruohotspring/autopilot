@@ -30,7 +30,8 @@ std::string shell_quote(const std::string& s) {
 }
 
 bool is_executable_file(const fs::path& path) {
-  return !path.empty() && fs::exists(path) && !fs::is_directory(path) && ::access(path.c_str(), X_OK) == 0;
+  return !path.empty() && fs::exists(path) && !fs::is_directory(path) &&
+         ::access(path.c_str(), X_OK) == 0;
 }
 
 std::optional<fs::path> find_executable_in_path(const std::string& name) {
@@ -62,7 +63,9 @@ std::string build_agent_shell_command(const std::string& agent_name, const std::
            shell_quote(prompt);
   }
   if (agent_name == "claude") {
-    return shell_quote(agent_name) + " -p --dangerously-skip-permissions " + shell_quote(prompt);
+    return shell_quote(agent_name) +
+           " -p --output-format stream-json --verbose --dangerously-skip-permissions " +
+           shell_quote(prompt);
   }
   return shell_quote(agent_name) + " " + shell_quote(prompt);
 }
@@ -184,10 +187,10 @@ AgentLaunchResult run_agent(
     throw std::runtime_error("agent CLI not found: " + agent_name);
   }
 
-  const std::string command =
-      "cd " + shell_quote(working_directory.string()) + " && " +
-      build_agent_shell_command(agent_name, prompt) + " >" + shell_quote(stdout_log.string()) + " 2>" +
-      shell_quote(stderr_log.string());
+  const std::string command = "cd " + shell_quote(working_directory.string()) + " && " +
+                              build_agent_shell_command(agent_name, prompt) + " >" +
+                              shell_quote(stdout_log.string()) + " 2>" +
+                              shell_quote(stderr_log.string());
 
   const int exit_code = decode_system_exit_code(std::system(command.c_str()));
   return AgentLaunchResult{agent_name, exit_code};

@@ -198,10 +198,43 @@ AgentLaunchResult run_agent_in_tmux(
   const bool session_exists =
       std::system(("tmux has-session -t " + session + " >/dev/null 2>&1").c_str()) == 0;
 
+  // For claude (stream-json output), write a display filter that converts JSON events to
+  // human-readable text for the tmux window, while the raw JSON is still captured to stdout.log.
+  std::string stdout_display;
+  if (agent_name == "claude") {
+    const fs::path filter_script = stdout_log.parent_path() / "display_filter.py";
+    write_text_file(filter_script, "import sys\nimport json\n\nfor line in sys.stdin:\n"
+                                   "    line = line.strip()\n"
+                                   "    if not line:\n"
+                                   "        continue\n"
+                                   "    try:\n"
+                                   "        event = json.loads(line)\n"
+                                   "    except Exception:\n"
+                                   "        continue\n"
+                                   "    if event.get(\"type\") != \"assistant\":\n"
+                                   "        continue\n"
+                                   "    for block in event.get(\"message\", {}).get(\"content\", []):\n"
+                                   "        block_type = block.get(\"type\")\n"
+                                   "        if block_type == \"thinking\":\n"
+                                   "            text = block.get(\"thinking\", \"\").strip()\n"
+                                   "            if text:\n"
+                                   "                print(\"[thinking] \" + text, flush=True)\n"
+                                   "        elif block_type == \"text\":\n"
+                                   "            text = block.get(\"text\", \"\").strip()\n"
+                                   "            if text:\n"
+                                   "                print(text, flush=True)\n"
+                                   "        elif block_type == \"tool_use\":\n"
+                                   "            name = block.get(\"name\", \"?\")\n"
+                                   "            inp = block.get(\"input\", {})\n"
+                                   "            value = next(iter(inp.values()), \"\") if inp else \"\"\n"
+                                   "            print(\"[\" + name + \"] \" + str(value)[:60], flush=True)\n");
+    stdout_display = " | python3 " + shell_quote(filter_script.string());
+  }
+
   const std::string agent_command =
       "cd " + shell_quote(working_directory.string()) + " && " +
       build_agent_shell_command(agent_name, prompt) + " > >(tee " + shell_quote(stdout_log.string()) +
-      ") 2> >(tee " + shell_quote(stderr_log.string()) + " >&2)";
+      stdout_display + ") 2> >(tee " + shell_quote(stderr_log.string()) + " >&2)";
   const std::string worker_script =
       "set +e; " + agent_command + "; status=$?; printf '%s\\n' \"$status\" > " +
       shell_quote(exit_code_file.string()) + "; tmux wait-for -S " + shell_quote(channel) +

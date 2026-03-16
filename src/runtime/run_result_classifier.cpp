@@ -85,6 +85,96 @@ std::string read_last_non_empty_line(const std::filesystem::path& file) {
   return last_non_empty;
 }
 
+std::string last_non_empty_line_of(const std::string& text) {
+  std::istringstream input(text);
+  std::string line;
+  std::string last_non_empty;
+  while (std::getline(input, line)) {
+    const std::string trimmed = trim_ascii_whitespace(line);
+    if (!trimmed.empty()) {
+      last_non_empty = trimmed;
+    }
+  }
+  return last_non_empty;
+}
+
+// Returns true if the content looks like claude's --output-format stream-json (JSONL).
+bool is_stream_json_content(const std::string& contents) {
+  if (contents.empty()) {
+    return false;
+  }
+  std::istringstream input(contents);
+  std::string line;
+  while (std::getline(input, line)) {
+    const std::string trimmed = trim_ascii_whitespace(line);
+    if (trimmed.empty()) {
+      continue;
+    }
+    return trimmed.find("{\"type\":\"") == 0;
+  }
+  return false;
+}
+
+// Unescapes a JSON string value (handles \n, \t, \\, \", \/).
+std::string unescape_json_string(const std::string& src, const std::size_t start) {
+  std::string result;
+  bool escaped = false;
+  for (std::size_t i = start; i < src.size(); ++i) {
+    const char c = src[i];
+    if (escaped) {
+      if (c == 'n') {
+        result.push_back('\n');
+      } else if (c == 't') {
+        result.push_back('\t');
+      } else if (c == 'r') {
+        result.push_back('\r');
+      } else if (c == '\\' || c == '"' || c == '/') {
+        result.push_back(c);
+      } else {
+        result.push_back('\\');
+        result.push_back(c);
+      }
+      escaped = false;
+    } else if (c == '\\') {
+      escaped = true;
+    } else if (c == '"') {
+      break;
+    } else {
+      result.push_back(c);
+    }
+  }
+  return result;
+}
+
+// Extracts the text of the "result" field from a stream-json line if present.
+std::optional<std::string> extract_result_field(const std::string& json_line) {
+  const std::string key = "\"result\":\"";
+  const std::size_t pos = json_line.find(key);
+  if (pos == std::string::npos) {
+    return std::nullopt;
+  }
+  return unescape_json_string(json_line, pos + key.size());
+}
+
+// Extracts the final result text from claude's stream-json stdout.
+// Searches for the last {"type":"result",...} event and returns its "result" field.
+std::string extract_text_from_stream_json(const std::string& contents) {
+  std::istringstream input(contents);
+  std::string line;
+  std::string result_text;
+  while (std::getline(input, line)) {
+    const std::string trimmed = trim_ascii_whitespace(line);
+    if (trimmed.find("\"type\":\"result\"") == std::string::npos) {
+      continue;
+    }
+    const std::optional<std::string> extracted = extract_result_field(trimmed);
+    if (extracted.has_value()) {
+      result_text = *extracted;
+    }
+  }
+  return result_text;
+}
+
 std::optional<BlockerMatch> find_blocker_marker(const std::string& contents) {
   std::istringstream input(contents);
   std::string line;
@@ -116,15 +206,20 @@ std::optional<BlockerMatch> find_blocker_marker(const std::string& contents) {
 
 RunResultClassification classify_run_result(
     const int exit_code, const std::filesystem::path& stdout_log, const std::filesystem::path& stderr_log) {
-  const std::string stdout_contents = read_text_file(stdout_log);
+  const std::string raw_stdout = read_text_file(stdout_log);
   const std::string stderr_contents = read_text_file(stderr_log);
+
+  // If stdout is claude's stream-json format, extract the final result text for classification.
+  const std::string stdout_contents =
+      is_stream_json_content(raw_stdout) ? extract_text_from_stream_json(raw_stdout) : raw_stdout;
+
   const std::optional<BlockerMatch> blocker =
       find_blocker_marker(stdout_contents).has_value() ? find_blocker_marker(stdout_contents)
                                                        : find_blocker_marker(stderr_contents);
 
   RunResultClassification result;
   result.process_status = exit_code == 0 ? "succeeded" : "failed";
-  result.summary_excerpt = read_last_non_empty_line(stdout_log);
+  result.summary_excerpt = last_non_empty_line_of(stdout_contents);
   if (result.summary_excerpt.empty()) {
     result.summary_excerpt = read_last_non_empty_line(stderr_log);
   }
