@@ -11,5 +11,5 @@
 - colonel communicates with general in Japanese.
 
 ## Session policy
-- Invoke $ap-self-recognition at the beginning of each session.
+- When launched by autopilot, $ap-self-recognition is included in the prompt. Execute it before taking any action.
 - Use $ap-briefing only when acting as colonel.

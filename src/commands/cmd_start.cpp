@@ -112,6 +112,7 @@ std::string build_prompt(
   oss << "Implement the selected task if possible.\n";
   oss << "You may inspect and edit files in the working directory.\n";
   oss << "At the end, print a short summary of what you changed.\n";
+  oss << "\n/ap-self-recognition\n";
   return oss.str();
 }
 

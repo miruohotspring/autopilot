@@ -1,12 +1,12 @@
 ---
 name: ap-self-recognition
-description: Use this skill at session start to identify the current role (general, colonel, or captain), confirm responsibilities, and check unresolved tasks or blockers before taking action.
+description: Use this skill when launched by autopilot to identify the current role (general, colonel, or captain), confirm responsibilities, and check unresolved tasks or blockers before taking action.
 ---
 
 # Self Recognition
 
 ## When To Use
-- At the beginning of any new session.
+- When launched by autopilot (i.e., the prompt explicitly includes /ap-self-recognition).
 - After directory or role context changes.
 - Before delegating, requesting approval, or starting a new operation.
 
