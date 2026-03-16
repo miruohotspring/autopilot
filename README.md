@@ -117,6 +117,7 @@ Enter project slug:
 
 ```yaml
 <project_name>:
+  slug: '<project_slug>'
   priority: 1
   paths: []
 ```
@@ -131,7 +132,6 @@ $HOME/.autopilot/projects/<project_name>
 
 - `TODO.md`
 - `dashboard.md` (captain -> colonel status handoff template)
-- `project.yaml` (`name`, `slug`, `paths`)
 
 ## Delete project
 
@@ -200,7 +200,7 @@ Enter path name [main]:
 When you press Enter without input, `main` is used as the default.
 If `main` already exists in that project, empty input is rejected and explicit input is required.
 
-`ap add` stores both `name` and `path` in `projects.yaml`.
+`ap add` stores `slug`, `name`, and `path` metadata in `projects.yaml`.
 
 `name` and `path` are one-to-one in each project:
 
@@ -214,8 +214,6 @@ If the same `name/path` pair already exists in the target project, `ap add` does
 ```text
 $HOME/.autopilot/projects/<project_name>/<name> -> <path>
 ```
-
-It also updates `$HOME/.autopilot/projects/<project_name>/project.yaml` to keep the path-name list in sync.
 
 ## Remove path
 

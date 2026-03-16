@@ -20,6 +20,14 @@ assert_exists() {
   fi
 }
 
+assert_not_exists() {
+  local path="$1"
+  if [[ -e "$path" ]]; then
+    echo "assert failed: expected not to exist: $path" >&2
+    exit 1
+  fi
+}
+
 assert_file_contains() {
   local path="$1"
   local expected="$2"
@@ -48,11 +56,15 @@ assert_file_equals() {
 assert_project_block() {
   local path="$1"
   local project="$2"
-  if ! awk -v project="$project" '
+  local slug="$3"
+  if ! awk -v project="$project" -v slug="$slug" '
     $0 == project ":" {
       if (getline line1 <= 0) next
       if (getline line2 <= 0) next
-      if (line1 == "  priority: 1" && line2 == "  paths: []") {
+      if (getline line3 <= 0) next
+      if (line1 == "  slug: \047" slug "\047" &&
+          line2 == "  priority: 1" &&
+          line3 == "  paths: []") {
         found = 1
       }
     }
@@ -91,7 +103,7 @@ if [[ "$status1" -eq 0 ]]; then
 fi
 assert_file_contains "$stderr1" "Please run ap init first"
 
-echo "[test] creates project.yaml, TODO.md, dashboard.md, and projects.yaml entry"
+echo "[test] creates TODO.md, dashboard.md, and projects.yaml entry"
 home2="$TMP_DIR/home2"
 mkdir -p "$home2/.autopilot"
 HOME="$home2" "$AP_BIN" new Project-1 project-1 >/dev/null
@@ -99,12 +111,9 @@ assert_exists "$home2/.autopilot/projects.yaml"
 assert_exists "$home2/.autopilot/projects/Project-1"
 assert_exists "$home2/.autopilot/projects/Project-1/TODO.md"
 assert_exists "$home2/.autopilot/projects/Project-1/dashboard.md"
-assert_exists "$home2/.autopilot/projects/Project-1/project.yaml"
-assert_project_block "$home2/.autopilot/projects.yaml" "Project-1"
+assert_not_exists "$home2/.autopilot/projects/Project-1/project.yaml"
+assert_project_block "$home2/.autopilot/projects.yaml" "Project-1" "project-1"
 assert_file_equals "$home2/.autopilot/projects/Project-1/TODO.md" "# Project-1 TODO"
-assert_file_contains "$home2/.autopilot/projects/Project-1/project.yaml" "name: 'Project-1'"
-assert_file_contains "$home2/.autopilot/projects/Project-1/project.yaml" "slug: 'project-1'"
-assert_file_contains "$home2/.autopilot/projects/Project-1/project.yaml" "paths: []"
 assert_file_contains "$home2/.autopilot/projects/Project-1/dashboard.md" "# Project-1 Dashboard"
 
 echo "[test] fails for duplicate project names"
@@ -132,7 +141,7 @@ stdout5="$TMP_DIR/stdout5.txt"
 printf 'Interactive9\ninteractive-9\n' | HOME="$home2" "$AP_BIN" new >"$stdout5"
 assert_file_contains "$stdout5" "Enter your new project name:"
 assert_file_contains "$stdout5" "Enter project slug:"
-assert_project_block "$home2/.autopilot/projects.yaml" "Interactive9"
-assert_file_contains "$home2/.autopilot/projects/Interactive9/project.yaml" "slug: 'interactive-9'"
+assert_project_block "$home2/.autopilot/projects.yaml" "Interactive9" "interactive-9"
+assert_not_exists "$home2/.autopilot/projects/Interactive9/project.yaml"
 
 echo "all tests passed"

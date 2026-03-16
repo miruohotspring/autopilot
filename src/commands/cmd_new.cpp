@@ -100,22 +100,7 @@ int cmd_new(
 
     write_heading_file(new_project_dir / "TODO.md", "TODO");
     write_dashboard_file(new_project_dir / "dashboard.md");
-    save_project_config(
-        new_project_dir / "project.yaml",
-        ProjectConfig{project_name, project_slug, {}});
-
-    const bool needs_leading_newline = !file_ends_with_newline(projects_file);
-    std::ofstream out(projects_file, std::ios::app);
-    if (!out) {
-      throw std::runtime_error(
-          "failed to open projects file for append: " + projects_file.string());
-    }
-    if (needs_leading_newline) {
-      out << '\n';
-    }
-    out << project_name << ":\n";
-    out << "  priority: 1\n";
-    out << "  paths: []\n";
+    append_project_config(projects_file, ProjectConfig{project_name, project_slug, {}});
     std::cout << "created project: " << project_name << '\n';
     return 0;
   } catch (const std::exception& e) {

@@ -645,9 +645,8 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
   try {
     const std::string project_name = resolve_project_name(maybe_project_name);
     const fs::path project_dir = project_dir_path(project_name);
-    const ProjectConfig project_config =
-        load_required_project_config(project_config_file_path(project_name));
     const fs::path projects_file = projects_file_path();
+    const ProjectConfig project_config = load_required_project_config(projects_file, project_name);
     const SelectedProjectPath selected_path = resolve_project_path(projects_file, project_name);
     const fs::path todo_file = project_dir / "TODO.md";
     if (!fs::exists(todo_file)) {

@@ -139,8 +139,10 @@ assert_file_contains "$stdout3" "Remove path '"
 assert_file_contains "$stdout3" "removed path:"
 assert_project_not_has_path "$projects_file" "AlphaProject" "$path_a1"
 assert_project_has_path "$projects_file" "AlphaProject" "$path_a2"
-assert_file_not_contains "$home2/.autopilot/projects/AlphaProject/project.yaml" "  - 'a1'"
-assert_file_contains "$home2/.autopilot/projects/AlphaProject/project.yaml" "  - 'a2'"
+if [[ -e "$home2/.autopilot/projects/AlphaProject/project.yaml" ]]; then
+  echo "assert failed: expected legacy project.yaml not to exist" >&2
+  exit 1
+fi
 
 # Case 4:
 # n confirmation should cancel removal.
@@ -168,7 +170,6 @@ assert_file_contains "$stdout5" "Select path to remove:"
 assert_file_contains "$stdout5" "Enter number to remove:"
 assert_project_not_has_path "$projects_file" "BetaProject" "$path_b1"
 assert_file_not_contains "$stdout5" "[y/n]:\nDelete project"
-assert_file_contains "$home2/.autopilot/projects/BetaProject/project.yaml" "paths: []"
 
 # Case 6:
 # Project with no paths should fail.

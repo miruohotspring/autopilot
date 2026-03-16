@@ -281,80 +281,45 @@ std::vector<ParsedPathItem> collect_paths_items(
   return items;
 }
 
-ProjectConfig parse_project_config_lines(
-    const std::vector<std::string>& lines, const fs::path& project_file) {
-  ProjectConfig config;
-  bool saw_name = false;
-  bool saw_slug = false;
-  bool in_paths = false;
-  std::size_t paths_indent_width = 0;
-
-  for (std::size_t i = 0; i < lines.size(); ++i) {
+std::string project_child_indent(
+    const std::vector<std::string>& lines, const ProjectRange& range) {
+  for (std::size_t i = range.begin + 1; i < range.end; ++i) {
     const std::string trimmed = trim_ascii_whitespace(lines[i]);
     if (trimmed.empty() || trimmed[0] == '#') {
       continue;
     }
 
-    const std::size_t indent_width = lines[i].find_first_not_of(" \t");
-    if (indent_width == std::string::npos) {
+    const std::size_t first_non_ws = lines[i].find_first_not_of(" \t");
+    if (first_non_ws == std::string::npos || first_non_ws == 0) {
       continue;
     }
+    return lines[i].substr(0, first_non_ws);
+  }
+  return "  ";
+}
 
-    if (in_paths) {
-      if (indent_width <= paths_indent_width) {
-        in_paths = false;
-      } else {
-        std::smatch item_match;
-        if (!std::regex_match(lines[i], item_match, kListItemRe)) {
-          throw std::runtime_error(
-              "failed to read project.yaml: invalid paths item at line " + std::to_string(i + 1));
-        }
-        config.paths.push_back(parse_yaml_scalar(item_match[2].str()));
-        continue;
-      }
+std::optional<std::string> find_project_slug(
+    const std::vector<std::string>& lines, const ProjectRange& range) {
+  const std::string child_indent = project_child_indent(lines, range);
+  for (std::size_t i = range.begin + 1; i < range.end; ++i) {
+    if (lines[i].rfind(child_indent, 0) != 0) {
+      continue;
+    }
+    const std::size_t first_non_ws = lines[i].find_first_not_of(" \t");
+    if (first_non_ws != child_indent.size()) {
+      continue;
     }
 
     const std::optional<std::pair<std::string, std::string>> key_value =
         parse_yaml_key_value(lines[i]);
     if (!key_value.has_value()) {
-      throw std::runtime_error(
-          "failed to read project.yaml: invalid line " + std::to_string(i + 1) + " in " +
-          project_file.string());
-    }
-
-    if (key_value->first == "name") {
-      config.name = parse_yaml_scalar(key_value->second);
-      saw_name = true;
       continue;
     }
     if (key_value->first == "slug") {
-      config.slug = parse_yaml_scalar(key_value->second);
-      saw_slug = true;
-      continue;
-    }
-    if (key_value->first == "paths") {
-      const std::string value = trim_ascii_whitespace(key_value->second);
-      if (value == "[]") {
-        config.paths.clear();
-        continue;
-      }
-      if (!value.empty()) {
-        throw std::runtime_error(
-            "failed to read project.yaml: unsupported paths format in " + project_file.string());
-      }
-      in_paths = true;
-      paths_indent_width = indent_width;
-      continue;
+      return parse_yaml_scalar(key_value->second);
     }
   }
-
-  if (!saw_name) {
-    throw std::runtime_error("failed to read project.yaml: missing name");
-  }
-  if (!saw_slug) {
-    throw std::runtime_error("failed to read project.yaml: missing slug");
-  }
-  return config;
+  return std::nullopt;
 }
 
 } // namespace
@@ -400,49 +365,70 @@ std::set<std::string> load_top_level_projects(const fs::path& projects_file) {
   return projects;
 }
 
-std::optional<ProjectConfig> load_project_config(const fs::path& project_file) {
-  if (!fs::exists(project_file)) {
+std::optional<ProjectConfig>
+load_project_config(const fs::path& projects_file, const std::string& project_name) {
+  if (!fs::exists(projects_file)) {
     return std::nullopt;
   }
 
-  const std::vector<std::string> lines = read_all_lines(project_file);
-  ProjectConfig config = parse_project_config_lines(lines, project_file);
+  const std::vector<std::string> lines = read_all_lines(projects_file);
+  const std::optional<ProjectRange> range = find_project_range(lines, project_name);
+  if (!range.has_value()) {
+    return std::nullopt;
+  }
+
+  const std::optional<std::string> slug = find_project_slug(lines, *range);
+  if (!slug.has_value()) {
+    throw std::runtime_error("failed to read project config: missing slug for project " + project_name);
+  }
+
+  ProjectConfig config;
+  config.name = project_name;
+  config.slug = *slug;
+  for (const ProjectPathEntry& entry : load_project_path_entries(projects_file, project_name)) {
+    config.paths.push_back(entry.name);
+  }
   if (!is_valid_project_slug(config.slug)) {
     throw std::runtime_error(
-        "failed to read project.yaml: invalid slug " + yaml_single_quote(config.slug));
+        "failed to read project config: invalid slug " + yaml_single_quote(config.slug));
   }
   return config;
 }
 
-ProjectConfig load_required_project_config(const fs::path& project_file) {
-  const std::optional<ProjectConfig> config = load_project_config(project_file);
+ProjectConfig load_required_project_config(
+    const fs::path& projects_file, const std::string& project_name) {
+  const std::optional<ProjectConfig> config = load_project_config(projects_file, project_name);
   if (!config.has_value()) {
-    throw std::runtime_error("failed to read project.yaml: file not found");
+    throw std::runtime_error("failed to read project config: project not found");
   }
   return *config;
 }
 
-void save_project_config(const fs::path& project_file, const ProjectConfig& config) {
+void append_project_config(const fs::path& projects_file, const ProjectConfig& config) {
   if (!is_valid_project_slug(config.slug)) {
-    throw std::runtime_error("failed to read project.yaml: invalid slug " + yaml_single_quote(config.slug));
+    throw std::runtime_error(
+        "failed to write project config: invalid slug " + yaml_single_quote(config.slug));
+  }
+  if (!is_valid_project_name(config.name)) {
+    throw std::runtime_error("failed to write project config: invalid project name");
+  }
+  if (!config.paths.empty()) {
+    throw std::runtime_error("failed to write project config: paths must be empty on create");
   }
 
-  std::ofstream out(project_file, std::ios::trunc);
-  if (!out) {
-    throw std::runtime_error("failed to write project.yaml: " + project_file.string());
+  std::vector<std::string> lines;
+  if (fs::exists(projects_file)) {
+    lines = read_all_lines(projects_file);
+  }
+  if (find_project_range(lines, config.name).has_value()) {
+    throw std::runtime_error("failed to write project config: project already exists");
   }
 
-  out << "name: " << yaml_single_quote(config.name) << '\n';
-  out << "slug: " << yaml_single_quote(config.slug) << '\n';
-  if (config.paths.empty()) {
-    out << "paths: []\n";
-    return;
-  }
-
-  out << "paths:\n";
-  for (const std::string& path_name : config.paths) {
-    out << "  - " << yaml_single_quote(path_name) << '\n';
-  }
+  lines.push_back(config.name + ":");
+  lines.push_back("  slug: " + yaml_single_quote(config.slug));
+  lines.push_back("  priority: 1");
+  lines.push_back("  paths: []");
+  write_all_lines(projects_file, lines);
 }
 
 std::vector<ProjectPathEntry>
@@ -514,22 +500,6 @@ bool project_has_path_name(
     }
   }
   return false;
-}
-
-bool file_ends_with_newline(const fs::path& file) {
-  if (!fs::exists(file) || fs::file_size(file) == 0) {
-    return true;
-  }
-
-  std::ifstream in(file, std::ios::binary);
-  if (!in) {
-    throw std::runtime_error("failed to read file: " + file.string());
-  }
-
-  in.seekg(-1, std::ios::end);
-  char ch = '\0';
-  in.get(ch);
-  return ch == '\n';
 }
 
 bool remove_project_block(const fs::path& projects_file, const std::string& project_name) {

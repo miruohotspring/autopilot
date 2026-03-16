@@ -178,8 +178,7 @@ int cmd_task_add(
       project_name = *selected_project;
     }
 
-    const ProjectConfig project_config =
-        load_required_project_config(project_config_file_path(project_name));
+    const ProjectConfig project_config = load_required_project_config(projects_file, project_name);
     const fs::path project_dir = project_dir_path(project_name);
     const fs::path todo_file = project_dir / "TODO.md";
     if (!fs::exists(todo_file)) {
