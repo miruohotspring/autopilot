@@ -52,7 +52,11 @@ TaskState parse_task_state_file(const fs::path& path) {
     task.source_text = json_read_required_string(json, "source_text");
     task.present_in_todo = json_read_required_bool(json, "present_in_todo");
     task.attempt_count = static_cast<int>(json_read_required_integer(json, "attempt_count"));
+    task.max_retries = static_cast<int>(json_read_optional_integer(json, "max_retries").value_or(3));
+    task.retry_on = json_read_optional_string_array(json, "retry_on")
+                        .value_or(std::vector<std::string>{"failed"});
     task.latest_run_id = json_read_optional_string(json, "latest_run_id");
+    task.last_run_exit_reason = json_read_optional_string(json, "last_run_exit_reason");
     task.last_error = json_read_optional_string(json, "last_error");
     task.blocker_reason = json_read_optional_string(json, "blocker_reason");
     task.blocker_category = json_read_optional_string(json, "blocker_category");
@@ -81,7 +85,10 @@ std::string build_task_state_json(const TaskState& task) {
   oss << "  \"source_text\": " << json_string(task.source_text) << ",\n";
   oss << "  \"present_in_todo\": " << (task.present_in_todo ? "true" : "false") << ",\n";
   oss << "  \"attempt_count\": " << task.attempt_count << ",\n";
+  oss << "  \"max_retries\": " << task.max_retries << ",\n";
+  oss << "  \"retry_on\": " << json_string_array(task.retry_on) << ",\n";
   oss << "  \"latest_run_id\": " << json_nullable_string(task.latest_run_id) << ",\n";
+  oss << "  \"last_run_exit_reason\": " << json_nullable_string(task.last_run_exit_reason) << ",\n";
   oss << "  \"last_error\": " << json_nullable_string(task.last_error) << ",\n";
   oss << "  \"blocker_reason\": " << json_nullable_string(task.blocker_reason) << ",\n";
   oss << "  \"blocker_category\": " << json_nullable_string(task.blocker_category) << ",\n";
@@ -97,8 +104,11 @@ std::string build_project_state_json(const ProjectState& project) {
   oss << "  \"project\": " << json_string(project.project) << ",\n";
   oss << "  \"status\": " << json_string(project.status) << ",\n";
   oss << "  \"active_task_id\": " << json_nullable_string(project.active_task_id) << ",\n";
+  oss << "  \"active_run_id\": " << json_nullable_string(project.active_run_id) << ",\n";
   oss << "  \"last_run_id\": " << json_nullable_string(project.last_run_id) << ",\n";
   oss << "  \"last_run_at\": " << json_nullable_string(project.last_run_at) << ",\n";
+  oss << "  \"run_counter\": " << project.run_counter << ",\n";
+  oss << "  \"default_timeout_seconds\": " << project.default_timeout_seconds << ",\n";
   oss << "  \"task_counts\": {\n";
   oss << "    \"todo\": " << project.task_counts.todo << ",\n";
   oss << "    \"in_progress\": " << project.task_counts.in_progress << ",\n";
@@ -144,8 +154,12 @@ std::optional<ProjectState> load_project_state(const fs::path& project_file) {
   project.project = json_read_required_string(json, "project");
   project.status = json_read_required_string(json, "status");
   project.active_task_id = json_read_optional_string(json, "active_task_id");
+  project.active_run_id = json_read_optional_string(json, "active_run_id");
   project.last_run_id = json_read_optional_string(json, "last_run_id");
   project.last_run_at = json_read_optional_string(json, "last_run_at");
+  project.run_counter = static_cast<int>(json_read_optional_integer(json, "run_counter").value_or(0));
+  project.default_timeout_seconds =
+      static_cast<int>(json_read_optional_integer(json, "default_timeout_seconds").value_or(1800));
   project.task_counts.todo = static_cast<int>(json_read_required_integer(json, "todo"));
   project.task_counts.in_progress =
       static_cast<int>(json_read_required_integer(json, "in_progress"));

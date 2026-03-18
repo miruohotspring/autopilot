@@ -9,10 +9,12 @@
 #include "autopilot/runtime/alert_store.hpp"
 #include "autopilot/runtime/event_log.hpp"
 #include "autopilot/runtime/json_utils.hpp"
+#include "autopilot/runtime/lock_manager.hpp"
 #include "autopilot/runtime/run_result_classifier.hpp"
 #include "autopilot/runtime/task_state_store.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
@@ -28,7 +30,9 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -72,7 +76,7 @@ std::string current_timestamp_with_offset() {
   return timestamp;
 }
 
-std::string current_run_id(const std::size_t source_line) {
+std::string format_run_id_with_counter(const int run_counter) {
   const auto now = std::chrono::system_clock::now();
   const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
   std::tm local_tm{};
@@ -83,13 +87,14 @@ std::string current_run_id(const std::size_t source_line) {
 #endif
 
   std::ostringstream oss;
-  oss << "run-" << std::put_time(&local_tm, "%Y%m%d-%H%M%S") << "-L" << source_line;
+  oss << "run-" << std::put_time(&local_tm, "%Y%m%d-%H%M%S") << "-L"
+      << std::setw(2) << std::setfill('0') << run_counter;
   return oss.str();
 }
 
-std::string allocate_run_id(const fs::path& runs_dir, const std::size_t source_line) {
+std::string allocate_run_id_with_counter(const fs::path& runs_dir, const int run_counter) {
   for (int attempt = 0; attempt < 200; ++attempt) {
-    const std::string run_id = current_run_id(source_line);
+    const std::string run_id = format_run_id_with_counter(run_counter);
     if (!fs::exists(runs_dir / run_id)) {
       return run_id;
     }
@@ -177,6 +182,90 @@ int read_exit_code_file(const fs::path& exit_code_file) {
   return exit_code;
 }
 
+int decode_system_exit_code(const int system_status) {
+  if (system_status == -1) {
+    return 1;
+  }
+  if (WIFEXITED(system_status)) {
+    return WEXITSTATUS(system_status);
+  }
+  if (WIFSIGNALED(system_status)) {
+    return 128 + WTERMSIG(system_status);
+  }
+  return 1;
+}
+
+pid_t launch_bash_command_async(const std::string& command) {
+  const pid_t child_pid = ::fork();
+  if (child_pid < 0) {
+    throw std::runtime_error("failed to fork runner process");
+  }
+  if (child_pid == 0) {
+    ::execl("/bin/bash", "bash", "-lc", command.c_str(), static_cast<char*>(nullptr));
+    _exit(127);
+  }
+  return child_pid;
+}
+
+int wait_for_process(const pid_t pid) {
+  int status = 0;
+  while (::waitpid(pid, &status, 0) < 0) {
+    if (errno == EINTR) {
+      continue;
+    }
+    throw std::runtime_error("failed to wait for runner process");
+  }
+  return decode_system_exit_code(status);
+}
+
+std::optional<int> wait_for_pid_file(const fs::path& pid_file, int attempts = 500) {
+  for (int attempt = 0; attempt < attempts; ++attempt) {
+    if (fs::exists(pid_file)) {
+      std::ifstream in(pid_file);
+      int pid = 0;
+      if (in >> pid && pid > 0) {
+        return pid;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return std::nullopt;
+}
+
+std::string build_logged_agent_command(
+    const std::string& agent_name,
+    const std::string& prompt,
+    const fs::path& working_directory,
+    const std::string& stdout_redirection,
+    const std::string& stderr_redirection) {
+  return "cd " + shell_quote(working_directory.string()) + " && exec " +
+         build_agent_shell_command(agent_name, prompt) + stdout_redirection + stderr_redirection;
+}
+
+std::string build_timed_shell_fragment(
+    const std::string& command,
+    const fs::path& timeout_marker_file,
+    int timeout_seconds) {
+  if (timeout_seconds <= 0) {
+    return command + "; status=$?";
+  }
+
+  const std::string marker = shell_quote(timeout_marker_file.string());
+  const std::string wrapped_command = shell_quote("set +e; " + command);
+  std::ostringstream oss;
+  oss << "rm -f " << marker << "; ";
+  oss << "setsid bash -lc " << wrapped_command << " & cmd_pid=$!; ";
+  oss << "(sleep " << timeout_seconds
+      << "; if kill -0 \"$cmd_pid\" 2>/dev/null; then : > " << marker
+      << "; kill -TERM -- -\"$cmd_pid\" 2>/dev/null; sleep 1; "
+      << "kill -KILL -- -\"$cmd_pid\" 2>/dev/null || true; "
+      << "fi) & watchdog_pid=$!; ";
+  oss << "wait \"$cmd_pid\"; status=$?; ";
+  oss << "kill \"$watchdog_pid\" 2>/dev/null || true; ";
+  oss << "wait \"$watchdog_pid\" 2>/dev/null || true";
+  return oss.str();
+}
+
 AgentLaunchResult run_agent_in_tmux(
     const std::string& project_name,
     const std::string& run_id,
@@ -184,16 +273,20 @@ AgentLaunchResult run_agent_in_tmux(
     const std::string& prompt,
     const fs::path& working_directory,
     const fs::path& stdout_log,
-    const fs::path& stderr_log) {
+    const fs::path& stderr_log,
+    int timeout_seconds,
+    const std::function<void(int)>& on_runner_started) {
   const std::string session = "autopilot";
   const std::string window_name = sanitize_tmux_name("start-" + project_name + "-" + run_id);
   const std::string target = session + ":" + window_name;
   const std::string channel = sanitize_tmux_name("ap-start-" + project_name + "-" + run_id);
   const fs::path exit_code_file = stdout_log.parent_path() / "agent.exit";
+  const fs::path runner_pid_file = stdout_log.parent_path() / "runner.pid";
 
   touch_empty_file(stdout_log);
   touch_empty_file(stderr_log);
   touch_empty_file(exit_code_file);
+  fs::remove(runner_pid_file);
 
   const bool session_exists =
       std::system(("tmux has-session -t " + session + " >/dev/null 2>&1").c_str()) == 0;
@@ -231,12 +324,19 @@ AgentLaunchResult run_agent_in_tmux(
     stdout_display = " | python3 " + shell_quote(filter_script.string());
   }
 
-  const std::string agent_command =
-      "cd " + shell_quote(working_directory.string()) + " && " +
-      build_agent_shell_command(agent_name, prompt) + " > >(tee " + shell_quote(stdout_log.string()) +
-      stdout_display + ") 2> >(tee " + shell_quote(stderr_log.string()) + " >&2)";
+  const std::string agent_command = build_logged_agent_command(
+      agent_name,
+      prompt,
+      working_directory,
+      " > >(tee " + shell_quote(stdout_log.string()) + stdout_display + ")",
+      " 2> >(tee " + shell_quote(stderr_log.string()) + " >&2)");
+  const std::string timed_agent_command = build_timed_shell_fragment(
+      agent_command,
+      stdout_log.parent_path() / "agent.timeout",
+      timeout_seconds);
   const std::string worker_script =
-      "set +e; " + agent_command + "; status=$?; printf '%s\\n' \"$status\" > " +
+      "set +e; printf '%s\\n' \"$$\" > " + shell_quote(runner_pid_file.string()) + "; " +
+      timed_agent_command + "; printf '%s\\n' \"$status\" > " +
       shell_quote(exit_code_file.string()) + "; tmux wait-for -S " + shell_quote(channel) +
       "; tmux kill-window -t " + shell_quote(target);
   const std::string tmux_command = "bash -lc " + shell_quote(worker_script);
@@ -256,6 +356,13 @@ AgentLaunchResult run_agent_in_tmux(
       throw std::runtime_error("failed to create tmux window");
     }
   }
+
+  const std::optional<int> runner_pid = wait_for_pid_file(runner_pid_file);
+  if (!runner_pid.has_value()) {
+    throw std::runtime_error("failed to read tmux runner pid");
+  }
+  on_runner_started(*runner_pid);
+  fs::remove(runner_pid_file);
 
   if (std::getenv("TMUX") != nullptr) {
     const std::string switch_cmd = "tmux switch-client -t " + shell_quote(target);
@@ -395,6 +502,7 @@ std::vector<TaskStatusChange> recover_stale_in_progress_tasks(
     }
     changes.push_back(TaskStatusChange{task.id, task.status, "failed"});
     task.status = "failed";
+    task.last_run_exit_reason = "failed";
     task.last_error = "previous ap start did not finish cleanly";
     task.blocker_reason = std::nullopt;
     task.blocker_category = std::nullopt;
@@ -511,7 +619,26 @@ void validate_task_state(
 }
 
 bool status_is_runnable_candidate(const TaskState& task) {
-  return task.status == "todo" || task.status == "failed";
+  if (task.status == "todo") {
+    return true;
+  }
+  if (task.status == "failed") {
+    if (task.attempt_count >= task.max_retries) {
+      return false;
+    }
+    if (!task.last_run_exit_reason.has_value()) {
+      return true;
+    }
+    return std::find(
+               task.retry_on.begin(),
+               task.retry_on.end(),
+               *task.last_run_exit_reason) != task.retry_on.end();
+  }
+  return false;
+}
+
+bool is_retry_exhausted(const TaskState& task) {
+  return task.status == "failed" && task.attempt_count >= task.max_retries;
 }
 
 bool dependencies_are_resolved(
@@ -533,13 +660,27 @@ int runnable_status_rank(const TaskState& task) {
   return task.status == "todo" ? 0 : 1;
 }
 
-TaskState* select_runnable_task(std::vector<TaskState>& tasks, const std::string& selected_path_name) {
+TaskState* select_runnable_task(
+    std::vector<TaskState>& tasks,
+    const std::string& selected_path_name,
+    int& retry_exhausted_count) {
+  retry_exhausted_count = 0;
   const std::map<std::string, const TaskState*> task_index = build_task_index(tasks);
   TaskState* selected = nullptr;
   for (TaskState& task : tasks) {
-    if (!task.present_in_todo || !status_is_runnable_candidate(task) || task.approval_required ||
+    if (!task.present_in_todo || task.approval_required ||
         !task_matches_selected_path(task, selected_path_name) ||
         !dependencies_are_resolved(task, task_index)) {
+      continue;
+    }
+
+    // Count tasks excluded due to retry exhaustion
+    if (is_retry_exhausted(task)) {
+      ++retry_exhausted_count;
+      continue;
+    }
+
+    if (!status_is_runnable_candidate(task)) {
       continue;
     }
 
@@ -563,19 +704,25 @@ ProjectState build_project_state(
     const std::vector<TaskState>& tasks,
     const std::optional<ProjectState>& previous_state,
     const std::optional<std::string>& active_task_id,
+    const std::optional<std::string>& active_run_id,
     const std::optional<std::string>& last_run_id,
     const std::optional<std::string>& last_run_at,
+    int run_counter,
+    int default_timeout_seconds,
     const std::string& updated_at) {
   ProjectState project = previous_state.value_or(ProjectState{});
   project.project = project_name;
   project.status = "active";
   project.active_task_id = active_task_id;
+  project.active_run_id = active_run_id;
   project.last_run_id = last_run_id.has_value()
                             ? last_run_id
                             : (previous_state.has_value() ? previous_state->last_run_id : std::nullopt);
   project.last_run_at = last_run_at.has_value()
                             ? last_run_at
                             : (previous_state.has_value() ? previous_state->last_run_at : std::nullopt);
+  project.run_counter = run_counter;
+  project.default_timeout_seconds = default_timeout_seconds;
   project.task_counts = compute_project_task_counts(tasks);
   project.updated_at = updated_at;
   return project;
@@ -589,6 +736,8 @@ void rollback_prelaunch_task_update(
     TaskState& task,
     const TaskState& previous_task,
     const std::optional<ProjectState>& previous_project_state,
+    int run_counter,
+    int default_timeout_seconds,
     const std::string& rollback_at) {
   try {
     task = previous_task;
@@ -602,6 +751,9 @@ void rollback_prelaunch_task_update(
             std::nullopt,
             std::nullopt,
             std::nullopt,
+            std::nullopt,
+            run_counter,
+            default_timeout_seconds,
             rollback_at));
   } catch (const std::exception&) {
   }
@@ -638,6 +790,8 @@ void finalize_postrun_failure(
     TaskState& task,
     const std::optional<ProjectState>& previous_project_state,
     const std::string& run_id,
+    int run_counter,
+    int default_timeout_seconds,
     const std::string& failure_reason,
     const std::string& failed_at) {
   if (task.status != "in_progress") {
@@ -658,8 +812,11 @@ void finalize_postrun_failure(
             tasks,
             previous_project_state,
             std::nullopt,
+            std::nullopt,
             run_id,
             failed_at,
+            run_counter,
+            default_timeout_seconds,
             failed_at));
   } catch (const std::exception&) {
   }
@@ -675,7 +832,9 @@ std::string completed_todo_line(const std::string& line) {
 
 } // namespace
 
-int cmd_start(const std::optional<std::string>& maybe_project_name) {
+int cmd_start(
+    const std::optional<std::string>& maybe_project_name,
+    std::optional<int> maybe_timeout_seconds) {
   try {
     const std::string project_name = resolve_project_name(maybe_project_name);
     const fs::path project_dir = project_dir_path(project_name);
@@ -694,14 +853,23 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
     const fs::path state_dir = runtime_dir / "state";
     const fs::path project_state_file = state_dir / "project.json";
     const fs::path tasks_dir = state_dir / "tasks";
+    const fs::path lock_dir = runtime_dir / "lock";
     const fs::path alerts_dir = runtime_dir / "alerts";
     const fs::path last_run_file = runtime_dir / "last_run.json";
     fs::create_directories(runs_dir);
     fs::create_directories(tasks_dir);
     fs::create_directories(events_file.parent_path());
+    fs::create_directories(lock_dir);
 
     EventLog event_log(events_file);
     const std::optional<ProjectState> previous_project_state = load_project_state(project_state_file);
+
+    // Determine run_counter and default_timeout_seconds from previous project state
+    int run_counter = previous_project_state.has_value() ? previous_project_state->run_counter : 0;
+    const int default_timeout_seconds =
+        previous_project_state.has_value() ? previous_project_state->default_timeout_seconds : 1800;
+    const int timeout_seconds = maybe_timeout_seconds.value_or(default_timeout_seconds);
+
     const std::vector<ProjectPathEntry> project_paths =
         load_project_path_entries(projects_file, project_name);
     std::set<std::string> valid_path_names;
@@ -730,74 +898,194 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
       return 1;
     }
 
-    const std::vector<TaskStatusChange> recovered_in_progress_changes =
-        recover_stale_in_progress_tasks(sync_result.tasks, synced_at);
     validate_task_state(sync_result.tasks, valid_path_names);
-    save_task_states(tasks_dir, sync_result.tasks);
-    for (const TaskState& task : sync_result.discovered_tasks) {
-      event_log.append(
-          project_name,
-          EventRecord{
-              task.id,
-              std::nullopt,
-              "task.discovered",
-              "ap.start",
-              {
-                  EventPayloadField{"title", json_string(task.title)},
-                  EventPayloadField{"source_line", std::to_string(task.source_line)},
-              },
-          });
-    }
-    for (const TaskUpdateChange& change : sync_result.task_updates) {
-      append_task_updated_event(event_log, project_name, change);
-    }
-    for (const TaskStatusChange& change : sync_result.status_changes) {
-      TaskState* changed_task = find_task_by_id(sync_result.tasks, change.task_id);
-      if (changed_task == nullptr) {
-        continue;
+    ProjectState project_state;
+    int retry_exhausted_count = 0;
+    const bool has_existing_in_progress = std::any_of(
+        existing_tasks.begin(),
+        existing_tasks.end(),
+        [](const TaskState& task) { return task.status == "in_progress"; });
+
+    auto append_retry_exhausted_events = [&]() {
+      for (const TaskState& task : sync_result.tasks) {
+        if (!task.present_in_todo || !is_retry_exhausted(task)) {
+          continue;
+        }
+        std::cerr << "ap start: task " << task.id << " has reached max retries ("
+                  << task.attempt_count << "/" << task.max_retries << "), skipping\n";
+        event_log.append(
+            project_name,
+            EventRecord{
+                task.id,
+                std::nullopt,
+                "task.retry_exhausted",
+                "ap.start",
+                {
+                    EventPayloadField{"attempt_count", std::to_string(task.attempt_count)},
+                    EventPayloadField{"max_retries", std::to_string(task.max_retries)},
+                },
+            });
       }
-      append_status_changed_event(
-          event_log,
-          project_name,
-          *changed_task,
-          std::nullopt,
-          change.from_status,
-          change.to_status,
-          "todo_sync");
-    }
-    for (const TaskStatusChange& change : recovered_in_progress_changes) {
-      TaskState* changed_task = find_task_by_id(sync_result.tasks, change.task_id);
-      if (changed_task == nullptr) {
-        continue;
+    };
+
+    auto print_no_runnable_message = [&]() {
+      if (retry_exhausted_count > 0) {
+        std::cerr << "ap start failed: no runnable task (" << retry_exhausted_count
+                  << " task" << (retry_exhausted_count == 1 ? "" : "s")
+                  << " exhausted max retries)\n";
+      } else {
+        std::cerr << "ap start failed: no runnable task\n";
       }
-      append_status_changed_event(
-          event_log,
+    };
+
+    auto persist_sync_state = [&](const std::vector<TaskStatusChange>& recovered_in_progress_changes) {
+      save_task_states(tasks_dir, sync_result.tasks);
+      for (const TaskState& task : sync_result.discovered_tasks) {
+        event_log.append(
+            project_name,
+            EventRecord{
+                task.id,
+                std::nullopt,
+                "task.discovered",
+                "ap.start",
+                {
+                    EventPayloadField{"title", json_string(task.title)},
+                    EventPayloadField{"source_line", std::to_string(task.source_line)},
+                },
+            });
+      }
+      for (const TaskUpdateChange& change : sync_result.task_updates) {
+        append_task_updated_event(event_log, project_name, change);
+      }
+      for (const TaskStatusChange& change : sync_result.status_changes) {
+        TaskState* changed_task = find_task_by_id(sync_result.tasks, change.task_id);
+        if (changed_task == nullptr) {
+          continue;
+        }
+        append_status_changed_event(
+            event_log,
+            project_name,
+            *changed_task,
+            std::nullopt,
+            change.from_status,
+            change.to_status,
+            "todo_sync");
+      }
+      for (const TaskStatusChange& change : recovered_in_progress_changes) {
+        TaskState* changed_task = find_task_by_id(sync_result.tasks, change.task_id);
+        if (changed_task == nullptr) {
+          continue;
+        }
+        append_status_changed_event(
+            event_log,
+            project_name,
+            *changed_task,
+            std::nullopt,
+            change.from_status,
+            change.to_status,
+            "stale_run_recovered");
+      }
+      for (const TaskStatusChange& change : recovered_in_progress_changes) {
+        TaskState* changed_task = find_task_by_id(sync_result.tasks, change.task_id);
+        if (changed_task == nullptr) {
+          continue;
+        }
+        const std::optional<std::string> interrupted_run_id = changed_task->latest_run_id;
+        event_log.append(
+            project_name,
+            EventRecord{
+                changed_task->id,
+                interrupted_run_id,
+                "run.interrupted",
+                "ap.start",
+                {
+                    EventPayloadField{
+                        "run_id",
+                        json_nullable_string(interrupted_run_id),
+                    },
+                    EventPayloadField{"detected_at", json_string(synced_at)},
+                },
+            });
+      }
+
+      project_state = build_project_state(
           project_name,
-          *changed_task,
+          sync_result.tasks,
+          previous_project_state,
           std::nullopt,
-          change.from_status,
-          change.to_status,
-          "stale_run_recovered");
+          std::nullopt,
+          std::nullopt,
+          std::nullopt,
+          run_counter,
+          default_timeout_seconds,
+          synced_at);
+      save_project_state(project_state_file, project_state);
+    };
+
+    std::vector<TaskStatusChange> recovered_in_progress_changes;
+    bool sync_state_persisted = false;
+    if (has_existing_in_progress) {
+      LockManager sync_lock_manager(lock_dir);
+      bool sync_lock_was_stale = false;
+      LockInfo sync_stale_info{};
+      const bool sync_lock_acquired = sync_lock_manager.acquire_project_lock(
+          allocate_run_id_with_counter(runs_dir, 0),
+          timeout_seconds,
+          sync_lock_was_stale,
+          sync_stale_info);
+
+      if (sync_lock_was_stale) {
+        event_log.append(
+            project_name,
+            EventRecord{
+                std::nullopt,
+                std::nullopt,
+                "lock.stale_detected",
+                "ap.start",
+                {
+                    EventPayloadField{"stale_pid", std::to_string(sync_stale_info.pid)},
+                    EventPayloadField{"stale_run_id", json_string(sync_stale_info.run_id)},
+                },
+            });
+        std::cerr << "ap start: stale lock detected for pid " << sync_stale_info.pid
+                  << ", recovering\n";
+      }
+
+      if (!sync_lock_acquired) {
+        std::cerr << "ap start failed: project is already locked by pid " << sync_stale_info.pid
+                  << " (run: " << sync_stale_info.run_id << ")\n";
+        return 1;
+      }
+
+      try {
+        recovered_in_progress_changes = recover_stale_in_progress_tasks(sync_result.tasks, synced_at);
+        append_retry_exhausted_events();
+        persist_sync_state(recovered_in_progress_changes);
+        sync_state_persisted = true;
+      } catch (const std::exception&) {
+        sync_lock_manager.release_project_lock();
+        throw;
+      }
+      sync_lock_manager.release_project_lock();
     }
 
-    ProjectState project_state = build_project_state(
-        project_name,
-        sync_result.tasks,
-        previous_project_state,
-        std::nullopt,
-        std::nullopt,
-        std::nullopt,
-        synced_at);
-    save_project_state(project_state_file, project_state);
+    TaskState* selected_task =
+        select_runnable_task(sync_result.tasks, selected_path.name, retry_exhausted_count);
 
-    TaskState* selected_task = select_runnable_task(sync_result.tasks, selected_path.name);
     if (selected_task == nullptr) {
-      std::cerr << "ap start failed: no runnable task\n";
+      if (!sync_state_persisted) {
+        append_retry_exhausted_events();
+        persist_sync_state(recovered_in_progress_changes);
+      }
+      print_no_runnable_message();
       return 1;
     }
 
     const std::string agent_name = resolve_agent_name();
-    const std::string run_id = allocate_run_id(runs_dir, selected_task->source_line);
+
+    // Generate run_id using the incremented run_counter
+    ++run_counter;
+    const std::string run_id = allocate_run_id_with_counter(runs_dir, run_counter);
     const fs::path run_dir = runs_dir / run_id;
     fs::create_directories(run_dir);
 
@@ -806,13 +1094,89 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
     const fs::path stdout_file = run_dir / "stdout.log";
     const fs::path stderr_file = run_dir / "stderr.log";
     const fs::path result_file = run_dir / "result.json";
+    const fs::path timeout_marker_file = run_dir / "agent.timeout";
 
+    // --- Phase 5: Lock acquisition ---
+    LockManager lock_manager(lock_dir);
+
+    // Acquire project lock
+    bool proj_lock_was_stale = false;
+    LockInfo proj_stale_info{};
+    const bool proj_lock_acquired =
+        lock_manager.acquire_project_lock(run_id, timeout_seconds, proj_lock_was_stale, proj_stale_info);
+
+    if (proj_lock_was_stale) {
+      event_log.append(
+          project_name,
+          EventRecord{
+              std::nullopt,
+              std::nullopt,
+              "lock.stale_detected",
+              "ap.start",
+              {
+                  EventPayloadField{"stale_pid", std::to_string(proj_stale_info.pid)},
+                  EventPayloadField{"stale_run_id", json_string(proj_stale_info.run_id)},
+              },
+          });
+      std::cerr << "ap start: stale lock detected for pid " << proj_stale_info.pid
+                << ", recovering\n";
+    }
+
+    if (!proj_lock_acquired) {
+      std::cerr << "ap start failed: project is already locked by pid " << proj_stale_info.pid
+                << " (run: " << proj_stale_info.run_id << ")\n";
+      return 1;
+    }
+
+    event_log.append(
+        project_name,
+        EventRecord{
+            std::nullopt,
+            run_id,
+            "lock.acquired",
+            "ap.start",
+            {
+                EventPayloadField{"lock_type", json_string("project")},
+                EventPayloadField{"run_id", json_string(run_id)},
+            },
+        });
+
+    if (!sync_state_persisted) {
+      append_retry_exhausted_events();
+      persist_sync_state(recovered_in_progress_changes);
+    }
+
+    // Acquire task lock
+    const bool task_lock_acquired =
+        lock_manager.acquire_task_lock(selected_task->id, run_id, timeout_seconds);
+    if (!task_lock_acquired) {
+      lock_manager.release_project_lock();
+      std::cerr << "ap start failed: task " << selected_task->id << " is already locked\n";
+      return 1;
+    }
+
+    event_log.append(
+        project_name,
+        EventRecord{
+            selected_task->id,
+            run_id,
+            "lock.acquired",
+            "ap.start",
+            {
+                EventPayloadField{"lock_type", json_string("task")},
+                EventPayloadField{"task_id", json_string(selected_task->id)},
+                EventPayloadField{"run_id", json_string(run_id)},
+            },
+        });
+
+    // --- Update task state and begin run ---
     const std::string started_at = current_timestamp_with_offset();
     const TaskState previous_task_state = *selected_task;
     const std::string previous_status = selected_task->status;
     selected_task->status = "in_progress";
     ++selected_task->attempt_count;
     selected_task->latest_run_id = run_id;
+    selected_task->last_run_exit_reason = std::nullopt;
     selected_task->last_error = std::nullopt;
     selected_task->blocker_reason = std::nullopt;
     selected_task->blocker_category = std::nullopt;
@@ -824,8 +1188,11 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
         sync_result.tasks,
         previous_project_state,
         selected_task->id,
+        run_id,
         std::nullopt,
         std::nullopt,
+        run_counter,
+        default_timeout_seconds,
         started_at);
     AgentLaunchResult launch_result{agent_name, 1};
     bool launch_started = false;
@@ -888,30 +1255,46 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
                       "working_directory",
                       json_string(selected_path.path.string()),
                   },
-                  EventPayloadField{
-                      "attempt_number",
-                      std::to_string(selected_task->attempt_count),
-                  },
+                  EventPayloadField{"attempt", std::to_string(selected_task->attempt_count)},
               },
           });
 
       started_clock = std::chrono::steady_clock::now();
-      launch_started = true;
-      launch_result = tmux_is_available()
-                          ? run_agent_in_tmux(
-                                project_name,
-                                run_id,
-                                agent_name,
-                                prompt,
-                                selected_path.path,
-                                stdout_file,
-                                stderr_file)
-                          : run_agent(
-                                agent_name,
-                                prompt,
-                                selected_path.path,
-                                stdout_file,
-                                stderr_file);
+
+      // For direct (non-tmux) run, wrap command with timeout
+      if (tmux_is_available()) {
+        launch_result = run_agent_in_tmux(
+            project_name,
+            run_id,
+            agent_name,
+            prompt,
+            selected_path.path,
+            stdout_file,
+            stderr_file,
+            timeout_seconds,
+            [&](const int runner_pid) {
+              lock_manager.transfer_project_lock_pid(runner_pid);
+              lock_manager.transfer_task_lock_pid(selected_task->id, runner_pid);
+              launch_started = true;
+            });
+      } else {
+        // Build command with optional timeout wrapper for direct execution
+        const std::string base_cmd = build_logged_agent_command(
+            agent_name,
+            prompt,
+            selected_path.path,
+            " >" + shell_quote(stdout_file.string()),
+            " 2>" + shell_quote(stderr_file.string()));
+        const std::string wrapped_command =
+            "set +e; " +
+            build_timed_shell_fragment(base_cmd, timeout_marker_file, timeout_seconds) +
+            "; exit \"$status\"";
+        const pid_t runner_pid = launch_bash_command_async(wrapped_command);
+        lock_manager.transfer_project_lock_pid(static_cast<int>(runner_pid));
+        lock_manager.transfer_task_lock_pid(selected_task->id, static_cast<int>(runner_pid));
+        launch_started = true;
+        launch_result = AgentLaunchResult{agent_name, wait_for_process(runner_pid)};
+      }
     } catch (const std::exception&) {
       if (!launch_started) {
         rollback_prelaunch_task_update(
@@ -922,7 +1305,11 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
             *selected_task,
             previous_task_state,
             previous_project_state,
+            run_counter,
+            default_timeout_seconds,
             current_timestamp_with_offset());
+        lock_manager.release_task_lock(selected_task->id);
+        lock_manager.release_project_lock();
       }
       throw;
     }
@@ -937,15 +1324,60 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
     RunResultClassification classification;
     bool succeeded = false;
     bool blocked = false;
+    bool timed_out = false;
     bool todo_update_applied = false;
     std::optional<AlertRecord> created_alert;
+    std::string exit_reason;
     try {
-      rewrite_stream_json_stdout_log(stdout_file, stderr_file);
-      classification = classify_run_result(launch_result.exit_code, stdout_file, stderr_file);
+      timed_out = fs::exists(timeout_marker_file);
+      if (timed_out) {
+        fs::remove(timeout_marker_file);
+      }
+
+      if (timed_out) {
+        exit_reason = "timeout";
+        // Record run.timeout event
+        event_log.append(
+            project_name,
+            EventRecord{
+                selected_task->id,
+                run_id,
+                "run.timeout",
+                "ap.start",
+                {
+                    EventPayloadField{"task_id", json_string(selected_task->id)},
+                    EventPayloadField{"run_id", json_string(run_id)},
+                    EventPayloadField{"timeout_seconds", std::to_string(timeout_seconds)},
+                    EventPayloadField{"pid", std::to_string(static_cast<int>(::getpid()))},
+                },
+            });
+        std::cerr << "ap start: task " << selected_task->id << " timed out after "
+                  << timeout_seconds << " seconds\n";
+
+        // Timeout is treated as failure
+        classification.final_task_status = "failed";
+        classification.process_status = "timeout";
+        classification.summary_excerpt = "timed out after " + std::to_string(timeout_seconds) + "s";
+      } else {
+        rewrite_stream_json_stdout_log(stdout_file, stderr_file);
+        classification = classify_run_result(launch_result.exit_code, stdout_file, stderr_file);
+      }
+
       succeeded = classification.final_task_status == "done";
       blocked = classification.final_task_status == "blocked";
 
+      if (!timed_out) {
+        if (succeeded) {
+          exit_reason = "done";
+        } else if (blocked) {
+          exit_reason = "blocked";
+        } else {
+          exit_reason = "failed";
+        }
+      }
+
       selected_task->status = classification.final_task_status;
+      selected_task->last_run_exit_reason = exit_reason;
       selected_task->updated_at = ended_at;
       if (classification.final_task_status == "done") {
         selected_task->last_error = std::nullopt;
@@ -958,6 +1390,11 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
         if (classification.approval_required) {
           selected_task->approval_required = true;
         }
+      } else if (timed_out) {
+        selected_task->last_error = std::optional<std::string>("timed out after " +
+                                                                std::to_string(timeout_seconds) + "s");
+        selected_task->blocker_reason = std::nullopt;
+        selected_task->blocker_category = std::nullopt;
       } else {
         selected_task->last_error =
             std::optional<std::string>("agent exited with status " +
@@ -972,8 +1409,11 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
           sync_result.tasks,
           previous_project_state,
           std::nullopt,
+          std::nullopt,
           run_id,
           ended_at,
+          run_counter,
+          default_timeout_seconds,
           ended_at);
       save_project_state(project_state_file, project_state);
 
@@ -1172,10 +1612,56 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
           *selected_task,
           previous_project_state,
           run_id,
+          run_counter,
+          default_timeout_seconds,
           "post-run processing failed: " + std::string(e.what()),
           current_timestamp_with_offset());
+      // Release locks on exception
+      event_log.append(
+          project_name,
+          EventRecord{
+              selected_task->id,
+              run_id,
+              "lock.released",
+              "ap.start",
+              {EventPayloadField{"lock_type", json_string("task")}},
+          });
+      lock_manager.release_task_lock(selected_task->id);
+      event_log.append(
+          project_name,
+          EventRecord{
+              std::nullopt,
+              run_id,
+              "lock.released",
+              "ap.start",
+              {EventPayloadField{"lock_type", json_string("project")}},
+          });
+      lock_manager.release_project_lock();
       throw;
     }
+
+    // Release task lock, then project lock
+    event_log.append(
+        project_name,
+        EventRecord{
+            selected_task->id,
+            run_id,
+            "lock.released",
+            "ap.start",
+            {EventPayloadField{"lock_type", json_string("task")}},
+        });
+    lock_manager.release_task_lock(selected_task->id);
+
+    event_log.append(
+        project_name,
+        EventRecord{
+            std::nullopt,
+            run_id,
+            "lock.released",
+            "ap.start",
+            {EventPayloadField{"lock_type", json_string("project")}},
+        });
+    lock_manager.release_project_lock();
 
     if (succeeded) {
       std::cout << "completed task: " << selected_task->title << '\n';
@@ -1185,6 +1671,11 @@ int cmd_start(const std::optional<std::string>& maybe_project_name) {
     if (blocked) {
       std::cerr << "ap start blocked: "
                 << classification.blocker_reason.value_or("blocked by external dependency") << '\n';
+      return 1;
+    }
+
+    if (timed_out) {
+      std::cerr << "ap start failed: task timed out after " << timeout_seconds << " seconds\n";
       return 1;
     }
 

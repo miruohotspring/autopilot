@@ -19,8 +19,11 @@ struct TaskState {
   std::size_t source_line;
   std::string source_text;
   bool present_in_todo;
-  int attempt_count;
+  int attempt_count = 0;
+  int max_retries = 3;
+  std::vector<std::string> retry_on = {"failed"};
   std::optional<std::string> latest_run_id;
+  std::optional<std::string> last_run_exit_reason;
   std::optional<std::string> last_error;
   std::optional<std::string> blocker_reason;
   std::optional<std::string> blocker_category;
@@ -42,8 +45,11 @@ struct ProjectState {
   std::string project;
   std::string status;
   std::optional<std::string> active_task_id;
+  std::optional<std::string> active_run_id;
   std::optional<std::string> last_run_id;
   std::optional<std::string> last_run_at;
+  int run_counter = 0;
+  int default_timeout_seconds = 1800;
   ProjectTaskCounts task_counts;
   std::string updated_at;
 };

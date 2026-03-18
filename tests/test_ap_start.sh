@@ -48,12 +48,21 @@ write_fake_agent() {
   local dir="$1"
   local name="$2"
   mkdir -p "$dir"
-  cat >"$dir/$name" <<'EOF'
+cat >"$dir/$name" <<'EOF'
 #!/bin/bash
 set -euo pipefail
+if [[ "${FAKE_AGENT_IGNORE_TERM:-}" == "1" ]]; then
+  trap '' TERM HUP
+fi
+if [[ -n "${FAKE_AGENT_PID_FILE:-}" ]]; then
+  printf '%s\n' "$$" > "${FAKE_AGENT_PID_FILE}"
+fi
 printf '%s\n' "argv:$*"
 printf '%s\n' "${FAKE_AGENT_NAME:-agent}:${FAKE_AGENT_STDOUT:-fake agent completed}"
 printf '%s\n' "${FAKE_AGENT_NAME:-agent}:${FAKE_AGENT_STDERR:-}" >&2
+if [[ -n "${FAKE_AGENT_SLEEP_SECONDS:-}" ]]; then
+  sleep "${FAKE_AGENT_SLEEP_SECONDS}"
+fi
 if [[ -n "${FAKE_AGENT_MUTATE_TODO_FILE:-}" ]]; then
   perl -0pi -e 's/\Q$ENV{FAKE_AGENT_MUTATE_TODO_FROM}\E/$ENV{FAKE_AGENT_MUTATE_TODO_TO}/g' \
     "$FAKE_AGENT_MUTATE_TODO_FILE"
@@ -446,5 +455,440 @@ config_run_dir="$(latest_run_dir "$home2/.autopilot/projects/ConfigProject")"
 assert_file_contains "$stdout12" "completed task: config task"
 assert_file_contains "$config_run_dir/meta.json" "\"agent\": \"codex\""
 assert_file_contains "$config_run_dir/stdout.log" "argv:exec --skip-git-repo-check --sandbox workspace-write --full-auto"
+
+# --- Phase 5 tests ---
+
+echo "[test] run_counter increments and run_id uses counter format"
+counter_repo="$TMP_DIR/repo-counter"
+mkdir -p "$counter_repo"
+new_project "CounterProject" "counter" "$counter_repo"
+add_task "CounterProject" "counter task 1"
+add_task "CounterProject" "counter task 2"
+# Run first task
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" \
+  FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start CounterProject >/dev/null
+counter_state="$home2/.autopilot/projects/CounterProject/runtime/state/project.json"
+assert_file_contains "$counter_state" "\"run_counter\": 1"
+# run_id format: run-YYYYMMDD-HHMMSS-L01
+counter_run1_dir="$(latest_run_dir "$home2/.autopilot/projects/CounterProject")"
+counter_run1_id="$(basename "$counter_run1_dir")"
+if ! echo "$counter_run1_id" | grep -qE '^run-[0-9]+-[0-9]+-L[0-9]+$'; then
+  echo "assert failed: run_id '$counter_run1_id' does not match expected format" >&2
+  exit 1
+fi
+# Run second task
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" \
+  FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start CounterProject >/dev/null
+assert_file_contains "$counter_state" "\"run_counter\": 2"
+
+echo "[test] lock files are created during run and cleaned up after"
+lock_repo="$TMP_DIR/repo-lock"
+mkdir -p "$lock_repo"
+new_project "LockProject" "lock" "$lock_repo"
+add_task "LockProject" "lock task"
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" \
+  FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start LockProject >/dev/null
+lock_dir="$home2/.autopilot/projects/LockProject/runtime/lock"
+# Lock files should be cleaned up after successful run
+if [[ -f "$lock_dir/project.lock" ]]; then
+  echo "assert failed: project.lock should be deleted after run" >&2
+  exit 1
+fi
+# lock.acquired and lock.released events should be recorded
+assert_file_contains \
+  "$home2/.autopilot/projects/LockProject/runtime/events/events.jsonl" \
+  "\"type\": \"lock.acquired\""
+assert_file_contains \
+  "$home2/.autopilot/projects/LockProject/runtime/events/events.jsonl" \
+  "\"type\": \"lock.released\""
+
+echo "[test] live project lock blocks concurrent start"
+cont_repo="$TMP_DIR/repo-concurrent"
+mkdir -p "$cont_repo"
+new_project "ConcurrentProject" "concurrent" "$cont_repo"
+add_task "ConcurrentProject" "concurrent task"
+cont_stdout="$TMP_DIR/start_concurrent_stdout.txt"
+cont_stderr="$TMP_DIR/start_concurrent_stderr.txt"
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" FAKE_AGENT_SLEEP_SECONDS="2" \
+  "$AP_BIN" start ConcurrentProject >"$cont_stdout" 2>"$cont_stderr" &
+cont_pid=$!
+cont_lock_dir="$home2/.autopilot/projects/ConcurrentProject/runtime/lock"
+cont_project_state="$home2/.autopilot/projects/ConcurrentProject/runtime/state/project.json"
+cont_task_state="$home2/.autopilot/projects/ConcurrentProject/runtime/state/tasks/concurrent-0001.json"
+for _ in $(seq 1 100); do
+  if [[ -f "$cont_lock_dir/project.lock" ]] && \
+     [[ -f "$cont_task_state" ]] && \
+     grep -q --fixed-strings '"status": "in_progress"' "$cont_task_state"; then
+    break
+  fi
+  sleep 0.05
+done
+if [[ ! -f "$cont_lock_dir/project.lock" ]] || [[ ! -f "$cont_task_state" ]] || \
+   ! grep -q --fixed-strings '"status": "in_progress"' "$cont_task_state"; then
+  echo "assert failed: expected project.lock and in_progress task state while first start is running" >&2
+  kill "$cont_pid" 2>/dev/null || true
+  wait "$cont_pid" 2>/dev/null || true
+  exit 1
+fi
+cont_second_stderr="$TMP_DIR/start_concurrent_second_stderr.txt"
+set +e
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" \
+  "$AP_BIN" start ConcurrentProject >/dev/null 2>"$cont_second_stderr"
+cont_second_status=$?
+set -e
+if [[ "$cont_second_status" -eq 0 ]]; then
+  echo "assert failed: expected second ap start to fail while lock is held" >&2
+  kill "$cont_pid" 2>/dev/null || true
+  wait "$cont_pid" 2>/dev/null || true
+  exit 1
+fi
+assert_file_contains "$cont_second_stderr" "project is already locked"
+if [[ ! -f "$cont_lock_dir/project.lock" ]]; then
+  echo "assert failed: project.lock disappeared while first start still held it" >&2
+  kill "$cont_pid" 2>/dev/null || true
+  wait "$cont_pid" 2>/dev/null || true
+  exit 1
+fi
+assert_file_not_contains "$cont_project_state" "\"active_run_id\": null"
+assert_file_contains "$cont_task_state" "\"status\": \"in_progress\""
+assert_file_not_contains \
+  "$home2/.autopilot/projects/ConcurrentProject/runtime/events/events.jsonl" \
+  "\"reason\": \"stale_run_recovered\""
+assert_file_not_contains \
+  "$home2/.autopilot/projects/ConcurrentProject/runtime/events/events.jsonl" \
+  "\"type\": \"run.interrupted\""
+wait "$cont_pid"
+assert_file_contains "$cont_stdout" "completed task: concurrent task"
+
+echo "[test] killing parent ap process does not let a second start steal the live lock"
+owner_repo="$TMP_DIR/repo-owner-lock"
+mkdir -p "$owner_repo"
+new_project "OwnerLockProject" "owner-lock" "$owner_repo"
+add_task "OwnerLockProject" "owner lock task"
+owner_pid_file="$TMP_DIR/owner-lock-agent.pid"
+owner_stdout="$TMP_DIR/start_owner_stdout.txt"
+owner_stderr="$TMP_DIR/start_owner_stderr.txt"
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" FAKE_AGENT_SLEEP_SECONDS="3" FAKE_AGENT_PID_FILE="$owner_pid_file" \
+  "$AP_BIN" start OwnerLockProject >"$owner_stdout" 2>"$owner_stderr" &
+owner_ap_pid=$!
+owner_lock_dir="$home2/.autopilot/projects/OwnerLockProject/runtime/lock"
+for _ in $(seq 1 100); do
+  if [[ -f "$owner_lock_dir/project.lock" && -f "$owner_pid_file" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+if [[ ! -f "$owner_pid_file" ]]; then
+  echo "assert failed: expected fake agent pid file for owner-lock test" >&2
+  kill "$owner_ap_pid" 2>/dev/null || true
+  wait "$owner_ap_pid" 2>/dev/null || true
+  exit 1
+fi
+owner_agent_pid="$(cat "$owner_pid_file")"
+kill "$owner_ap_pid" 2>/dev/null || true
+sleep 0.2
+if ! kill -0 "$owner_agent_pid" 2>/dev/null; then
+  echo "assert failed: expected fake agent to keep running after parent ap was killed" >&2
+  exit 1
+fi
+owner_second_stderr="$TMP_DIR/start_owner_second_stderr.txt"
+set +e
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" \
+  "$AP_BIN" start OwnerLockProject >/dev/null 2>"$owner_second_stderr"
+owner_second_status=$?
+set -e
+if [[ "$owner_second_status" -eq 0 ]]; then
+  echo "assert failed: expected second ap start to fail while runner-owned lock is held" >&2
+  exit 1
+fi
+assert_file_contains "$owner_second_stderr" "project is already locked"
+assert_file_not_contains "$owner_second_stderr" "stale lock detected"
+sleep 3.5
+
+echo "[test] stale lock is detected and recovered"
+stale_repo="$TMP_DIR/repo-stale"
+mkdir -p "$stale_repo"
+new_project "StaleProject" "stale" "$stale_repo"
+add_task "StaleProject" "stale task"
+# First run to set up state
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" \
+  FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start StaleProject >/dev/null
+# Manually create a stale project.lock with a non-existent PID
+stale_lock_dir="$home2/.autopilot/projects/StaleProject/runtime/lock"
+mkdir -p "$stale_lock_dir"
+cat >"$stale_lock_dir/project.lock" <<EOF
+{
+  "pid": 99999999,
+  "run_id": "run-20260101-000000-L0",
+  "task_id": null,
+  "started_at": "2026-01-01T00:00:00+00:00",
+  "hostname": "test-host"
+}
+EOF
+# Add a todo task (first one is done)
+add_task "StaleProject" "task after stale"
+# ap start should recover the stale lock and succeed
+stale_stderr="$TMP_DIR/start_stale_stderr.txt"
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" \
+  FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start StaleProject >/dev/null 2>"$stale_stderr"
+assert_file_contains "$stale_stderr" "stale lock detected"
+assert_file_contains \
+  "$home2/.autopilot/projects/StaleProject/runtime/events/events.jsonl" \
+  "\"type\": \"lock.stale_detected\""
+
+echo "[test] old lock with a live reused pid is treated as stale after timeout margin"
+aged_repo="$TMP_DIR/repo-aged-lock"
+mkdir -p "$aged_repo"
+new_project "AgedLockProject" "aged-lock" "$aged_repo"
+add_task "AgedLockProject" "aged lock task"
+aged_lock_dir="$home2/.autopilot/projects/AgedLockProject/runtime/lock"
+mkdir -p "$aged_lock_dir"
+cat >"$aged_lock_dir/project.lock" <<EOF
+{
+  "pid": $$,
+  "run_id": "run-20260101-000000-L1",
+  "task_id": null,
+  "started_at": "2026-01-01T00:00:00+00:00",
+  "hostname": "test-host"
+}
+EOF
+touch -d '2 hours ago' "$aged_lock_dir/project.lock"
+aged_stderr="$TMP_DIR/start_aged_lock_stderr.txt"
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" \
+  "$AP_BIN" start AgedLockProject >/dev/null 2>"$aged_stderr"
+assert_file_contains "$aged_stderr" "stale lock detected"
+assert_file_contains \
+  "$home2/.autopilot/projects/AgedLockProject/runtime/events/events.jsonl" \
+  "\"type\": \"lock.stale_detected\""
+
+echo "[test] max_retries exhausted task is skipped with retry_exhausted event"
+retry_repo="$TMP_DIR/repo-retry"
+mkdir -p "$retry_repo"
+new_project "RetryProject" "retry" "$retry_repo"
+add_task "RetryProject" "exhausted task"
+# Manually set the task state to failed with attempt_count >= max_retries
+retry_tasks_dir="$home2/.autopilot/projects/RetryProject/runtime/state/tasks"
+mkdir -p "$retry_tasks_dir"
+# First run ap start once to create the task state file
+set +e
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" \
+  FAKE_AGENT_EXIT_CODE="1" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start RetryProject >/dev/null 2>/dev/null
+set -e
+# Now manually set attempt_count=3, max_retries=3 in the task state
+retry_task_file="$(find "$retry_tasks_dir" -name "*.json" | head -1)"
+perl -pi -e 's/"attempt_count": \d+/"attempt_count": 3/' "$retry_task_file"
+perl -pi -e 's/"status": "[^"]*"/"status": "failed"/' "$retry_task_file"
+# Add max_retries field if not present
+if ! grep -q "max_retries" "$retry_task_file"; then
+  perl -pi -e 's/"attempt_count": 3/"attempt_count": 3,\n  "max_retries": 3/' "$retry_task_file"
+fi
+# ap start should skip the exhausted task
+retry_stderr="$TMP_DIR/start_retry_stderr.txt"
+set +e
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" \
+  FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start RetryProject 2>"$retry_stderr" >/dev/null
+retry_status=$?
+set -e
+if [[ "$retry_status" -eq 0 ]]; then
+  echo "assert failed: expected ap start to fail when all tasks are exhausted" >&2
+  exit 1
+fi
+assert_file_contains "$retry_stderr" "max retries"
+assert_file_contains \
+  "$home2/.autopilot/projects/RetryProject/runtime/events/events.jsonl" \
+  "\"type\": \"task.retry_exhausted\""
+
+echo "[test] timeout detection uses watchdog marker instead of raw exit code"
+timeout_repo="$TMP_DIR/repo-timeout"
+mkdir -p "$timeout_repo"
+new_project "TimeoutProject" "timeout" "$timeout_repo"
+add_task "TimeoutProject" "timeout task"
+timeout_stderr="$TMP_DIR/start_timeout_stderr.txt"
+set +e
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" FAKE_AGENT_SLEEP_SECONDS="5" \
+  "$AP_BIN" start TimeoutProject --timeout 1 2>"$timeout_stderr" >/dev/null
+timeout_exit=$?
+set -e
+if [[ "$timeout_exit" -eq 0 ]]; then
+  echo "assert failed: expected ap start to fail on timeout" >&2
+  exit 1
+fi
+timeout_events="$home2/.autopilot/projects/TimeoutProject/runtime/events/events.jsonl"
+assert_file_contains "$timeout_events" "\"type\": \"run.timeout\""
+assert_file_contains "$timeout_stderr" "timed out after 1 seconds"
+# Task should be in failed state
+timeout_task="$(find "$home2/.autopilot/projects/TimeoutProject/runtime/state/tasks" -name "*.json" | head -1)"
+assert_file_contains "$timeout_task" "\"status\": \"failed\""
+assert_file_contains "$timeout_task" "\"last_run_exit_reason\": \"timeout\""
+assert_file_contains "$timeout_task" "\"last_error\": \"timed out after 1s\""
+
+echo "[test] timeout result is not retried when retry_on excludes timeout"
+timeout_retry_repo="$TMP_DIR/repo-timeout-retry"
+mkdir -p "$timeout_retry_repo"
+new_project "TimeoutRetryProject" "timeout-retry" "$timeout_retry_repo"
+add_task "TimeoutRetryProject" "timeout retry task"
+set +e
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" FAKE_AGENT_SLEEP_SECONDS="5" \
+  "$AP_BIN" start TimeoutRetryProject --timeout 1 >/dev/null 2>/dev/null
+set -e
+timeout_retry_task="$(find "$home2/.autopilot/projects/TimeoutRetryProject/runtime/state/tasks" -name "*.json" | head -1)"
+timeout_retry_stderr="$TMP_DIR/start_timeout_retry_stderr.txt"
+set +e
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" \
+  "$AP_BIN" start TimeoutRetryProject >/dev/null 2>"$timeout_retry_stderr"
+timeout_retry_status=$?
+set -e
+if [[ "$timeout_retry_status" -eq 0 ]]; then
+  echo "assert failed: expected timed out task to be excluded from retry by default" >&2
+  exit 1
+fi
+assert_file_contains "$timeout_retry_stderr" "no runnable task"
+assert_file_contains "$timeout_retry_task" "\"status\": \"failed\""
+assert_file_contains "$timeout_retry_task" "\"attempt_count\": 1"
+assert_file_contains "$timeout_retry_task" "\"last_run_exit_reason\": \"timeout\""
+
+echo "[test] agent exit code 124 is not misclassified as timeout"
+exit124_repo="$TMP_DIR/repo-exit124"
+mkdir -p "$exit124_repo"
+new_project "Exit124Project" "exit124" "$exit124_repo"
+add_task "Exit124Project" "exit 124 task"
+exit124_stderr="$TMP_DIR/start_exit124_stderr.txt"
+set +e
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" FAKE_AGENT_EXIT_CODE="124" \
+  "$AP_BIN" start Exit124Project >/dev/null 2>"$exit124_stderr"
+exit124_status=$?
+set -e
+if [[ "$exit124_status" -eq 0 ]]; then
+  echo "assert failed: expected ap start to fail on agent exit 124" >&2
+  exit 1
+fi
+assert_file_contains "$exit124_stderr" "agent exited with status 124"
+assert_file_not_contains "$exit124_stderr" "timed out"
+exit124_events="$home2/.autopilot/projects/Exit124Project/runtime/events/events.jsonl"
+assert_file_not_contains "$exit124_events" "\"type\": \"run.timeout\""
+exit124_task="$(find "$home2/.autopilot/projects/Exit124Project/runtime/state/tasks" -name "*.json" | head -1)"
+assert_file_contains "$exit124_task" "\"last_run_exit_reason\": \"failed\""
+assert_file_contains "$exit124_task" "\"last_error\": \"agent exited with status 124\""
+
+echo "[test] timeout kills the agent process before locks are released"
+kill_timeout_repo="$TMP_DIR/repo-timeout-kill"
+mkdir -p "$kill_timeout_repo"
+new_project "KillTimeoutProject" "kill-timeout" "$kill_timeout_repo"
+add_task "KillTimeoutProject" "timeout kill task"
+kill_timeout_pid_file="$TMP_DIR/kill-timeout.pid"
+kill_timeout_stderr="$TMP_DIR/start_kill_timeout_stderr.txt"
+set +e
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" FAKE_AGENT_SLEEP_SECONDS="30" FAKE_AGENT_IGNORE_TERM="1" \
+  FAKE_AGENT_PID_FILE="$kill_timeout_pid_file" \
+  "$AP_BIN" start KillTimeoutProject --timeout 1 >/dev/null 2>"$kill_timeout_stderr"
+kill_timeout_status=$?
+set -e
+if [[ "$kill_timeout_status" -eq 0 ]]; then
+  echo "assert failed: expected ap start to fail on forced timeout" >&2
+  exit 1
+fi
+kill_timeout_pid="$(cat "$kill_timeout_pid_file")"
+sleep 0.2
+if kill -0 "$kill_timeout_pid" 2>/dev/null; then
+  echo "assert failed: agent pid $kill_timeout_pid should be terminated after timeout" >&2
+  exit 1
+fi
+assert_file_contains "$kill_timeout_stderr" "timed out after 1 seconds"
+
+echo "[test] direct start does not require external timeout command"
+portable_repo="$TMP_DIR/repo-portable-timeout"
+mkdir -p "$portable_repo"
+new_project "PortableTimeoutProject" "portable-timeout" "$portable_repo"
+add_task "PortableTimeoutProject" "portable timeout task"
+fake_timeout_bin="$TMP_DIR/fake-timeout-bin"
+mkdir -p "$fake_timeout_bin"
+cat >"$fake_timeout_bin/timeout" <<'EOF'
+#!/bin/bash
+echo "unexpected timeout invocation" >&2
+exit 99
+EOF
+chmod +x "$fake_timeout_bin/timeout"
+portable_stdout="$TMP_DIR/start_portable_timeout_stdout.txt"
+portable_stderr="$TMP_DIR/start_portable_timeout_stderr.txt"
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" \
+  PATH="$fake_timeout_bin:$fake_bin:$PATH" FAKE_AGENT_NAME="claude" \
+  "$AP_BIN" start PortableTimeoutProject >"$portable_stdout" 2>"$portable_stderr"
+assert_file_contains "$portable_stdout" "completed task: portable timeout task"
+assert_file_not_contains "$portable_stderr" "unexpected timeout invocation"
+
+echo "[test] corrupted lock file is treated as stale and recovered"
+corrupt_repo="$TMP_DIR/repo-corrupt-lock"
+mkdir -p "$corrupt_repo"
+new_project "CorruptLockProject" "corrupt-lock" "$corrupt_repo"
+add_task "CorruptLockProject" "corrupt lock task"
+corrupt_lock_dir="$home2/.autopilot/projects/CorruptLockProject/runtime/lock"
+mkdir -p "$corrupt_lock_dir"
+cat >"$corrupt_lock_dir/project.lock" <<'EOF'
+{"pid": {}}
+EOF
+corrupt_stderr="$TMP_DIR/start_corrupt_lock_stderr.txt"
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" \
+  "$AP_BIN" start CorruptLockProject >/dev/null 2>"$corrupt_stderr"
+assert_file_contains "$corrupt_stderr" "stale lock detected"
+assert_file_contains \
+  "$home2/.autopilot/projects/CorruptLockProject/runtime/events/events.jsonl" \
+  "\"type\": \"lock.stale_detected\""
+
+echo "[test] active_run_id is set during run and cleared after"
+active_repo="$TMP_DIR/repo-active"
+mkdir -p "$active_repo"
+new_project "ActiveProject" "active" "$active_repo"
+add_task "ActiveProject" "active task"
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" \
+  FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start ActiveProject >/dev/null
+active_state="$home2/.autopilot/projects/ActiveProject/runtime/state/project.json"
+# After run, active_run_id should be null
+assert_file_contains "$active_state" "\"active_run_id\": null"
+# But last_run_id should be set
+assert_file_not_contains "$active_state" "\"last_run_id\": null"
+
+echo "[test] run.interrupted event is emitted for stale in_progress tasks"
+interrupted_repo="$TMP_DIR/repo-interrupted"
+mkdir -p "$interrupted_repo"
+new_project "InterruptedProject" "interrupted" "$interrupted_repo"
+add_task "InterruptedProject" "interrupted task"
+# First run to create state
+set +e
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" \
+  FAKE_AGENT_EXIT_CODE="1" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start InterruptedProject >/dev/null 2>/dev/null
+set -e
+# Manually set status to in_progress (simulating a crash mid-run)
+int_task="$(find "$home2/.autopilot/projects/InterruptedProject/runtime/state/tasks" -name "*.json" | head -1)"
+perl -pi -e 's/"status": "[^"]*"/"status": "in_progress"/' "$int_task"
+# Run ap start again - should detect interrupted run
+interrupted_stdout="$TMP_DIR/start_interrupted_stdout.txt"
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_NAME="claude" \
+  FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start InterruptedProject >"$interrupted_stdout" 2>/dev/null
+assert_file_contains \
+  "$home2/.autopilot/projects/InterruptedProject/runtime/events/events.jsonl" \
+  "\"type\": \"run.interrupted\""
+assert_file_contains "$interrupted_stdout" "completed task: interrupted task"
+assert_file_contains "$int_task" "\"status\": \"done\""
 
 echo "all tests passed"

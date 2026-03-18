@@ -22,7 +22,7 @@ void print_usage(const char* prog) {
   std::cerr << "       " << prog << " add <path> [-n <name>] [-p <project_name>]\n";
   std::cerr << "       " << prog << " task add <title> [-p <project_name>]\n";
   std::cerr << "       " << prog << " rm [-p <project_name>]\n";
-  std::cerr << "       " << prog << " start [project_name]\n";
+  std::cerr << "       " << prog << " start [project_name] [--timeout <seconds>]\n";
   std::cerr << "       " << prog << " briefing\n";
   std::cerr << "       " << prog << " kill\n";
   std::cerr << "       " << prog << " update\n";
@@ -143,14 +143,28 @@ int main(int argc, char** argv) {
   }
 
   if (cmd == "start") {
-    if (argc == 2) {
-      return cmd_start(std::nullopt);
+    std::optional<std::string> maybe_project;
+    std::optional<int> maybe_timeout;
+    int i = 2;
+    while (i < argc) {
+      const std::string arg = argv[i];
+      if (arg == "--timeout" && i + 1 < argc) {
+        try {
+          maybe_timeout = std::stoi(argv[i + 1]);
+        } catch (const std::exception&) {
+          print_usage(argv[0]);
+          return 1;
+        }
+        i += 2;
+      } else if (arg.rfind("--", 0) != 0 && !maybe_project.has_value()) {
+        maybe_project = arg;
+        ++i;
+      } else {
+        print_usage(argv[0]);
+        return 1;
+      }
     }
-    if (argc == 3) {
-      return cmd_start(std::string(argv[2]));
-    }
-    print_usage(argv[0]);
-    return 1;
+    return cmd_start(maybe_project, maybe_timeout);
   }
 
   if (cmd == "briefing") {
