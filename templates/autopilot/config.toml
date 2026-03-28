@@ -2,8 +2,12 @@
 #
 # [start]
 # agent:
-#   Preferred agent for `ap start`.
-#   Supported values now: "claude", "codex".
+#   Preferred actor for `ap start` / `ap run start`.
+#   Supported values now: "claude", "codex", "human".
+# reviewer_agent:
+#   Preferred actor for `ap review start`.
+#   Supported values now: "claude", "codex", "human".
+#   `human` is for manual workflow commands. `ap start` still requires CLI-backed agents.
 #   If omitted, `ap start` falls back to automatic detection.
 
 [start]

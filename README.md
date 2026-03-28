@@ -89,12 +89,20 @@ Current format:
 ```toml
 [start]
 agent = "claude"
+reviewer_agent = "claude"
 ```
 
-Supported values are `claude` and `codex`.
+Supported values are `claude`, `codex`, and `human`.
 
-- If `config.toml` sets `start.agent`, `ap start` uses that agent.
-- If the configured CLI is not found in `PATH`, `ap start` fails.
+- `human` is for the manual workflow commands:
+  - `ap run start`
+  - `ap run finish`
+  - `ap review start`
+  - `ap review submit`
+- `ap start` still requires CLI-backed agents. If `start.agent` or `start.reviewer_agent` is `human`, `ap start` fails.
+- If `config.toml` sets `start.agent`, `ap start` and `ap run start` use that actor by default.
+- If `config.toml` sets `start.reviewer_agent`, `ap review start` uses that actor by default.
+- If the configured CLI is not found in `PATH`, CLI-backed workflows fail.
 - If `start.agent` is not set, `ap start` falls back to automatic detection.
 
 ## New project
@@ -242,6 +250,29 @@ If `-p <project_name>` is omitted, `ap` asks you to select a project.
 It also creates the matching runtime task state file.
 
 `ap task add` requires the target project to already have at least one managed path. If the project has no path yet, it fails with `ap task add failed: no managed path`.
+
+## Workflow commands
+
+The task lifecycle can also be driven explicitly from the CLI.
+
+```bash
+ap task sync [project_name]
+ap task next [project_name]
+ap task set-status <task_id> --status <status> [-p <project_name>]
+ap recover [project_name]
+ap run start [project_name] [--task <task_id>] [--actor <actor>]
+ap run finish <run_id> --status <done|failed|blocked|timeout|cancelled> [--review] [--no-review]
+ap review start <coder_run_id> [--actor <actor>]
+ap review submit <reviewer_run_id> --verdict <approve|rework|blocked>
+```
+
+- `ap task sync` synchronizes `TODO.md` into `runtime/state/tasks`.
+- `ap task next` prints the next runnable task as `task_id<TAB>title`.
+- `ap recover` finalizes stale in-progress or stale reviewer runs.
+- `ap run start` publishes a coder run, moves the task to `in_progress`, and writes `prompt.txt`.
+- `ap run finish` finalizes a published coder run without spawning an agent. Use `--review` to move the task to `review_pending` instead of `done`.
+- `ap review start` publishes a reviewer run and writes the reviewer prompt.
+- `ap review submit` records the verdict and updates task state to `done`, `todo`, or `blocked`.
 
 ## Start task
 

@@ -72,6 +72,9 @@ if [[ -n "${FAKE_AGENT_PID_FILE:-}" ]]; then
   printf '%s\n' "$$" > "${FAKE_AGENT_PID_FILE}"
 fi
 printf '%s\n' "argv:$*"
+if [[ "${FAKE_AGENT_LOG_ANTHROPIC_API_KEY:-}" == "1" ]]; then
+  printf '%s\n' "anthropic_api_key:${ANTHROPIC_API_KEY-}"
+fi
 printf '%s\n' "${agent_name}:${stdout_message}"
 printf '%s\n' "${agent_name}:${stderr_message}" >&2
 if [[ -n "${sleep_seconds}" ]]; then
@@ -471,6 +474,23 @@ assert_file_contains "$config_run_dir/meta.json" "\"agent\": \"coder.codex\""
 assert_file_contains "$config_run_dir/stdout.log" "argv:exec --skip-git-repo-check --sandbox workspace-write --full-auto"
 rm -f "$home2/.autopilot/config.toml"
 
+echo "[test] claude launch ignores ANTHROPIC_API_KEY and uses local login flow"
+anthropic_repo="$TMP_DIR/repo-anthropic"
+mkdir -p "$anthropic_repo"
+new_project "AnthropicEnvProject" "anthenv" "$anthropic_repo"
+add_task "AnthropicEnvProject" "anthropic env task"
+stdout_anthropic="$TMP_DIR/start_stdout_anthropic.txt"
+env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" ANTHROPIC_API_KEY="dummy-key" \
+  FAKE_AGENT_NAME="claude" FAKE_AGENT_STDOUT="anthropic env ok" \
+  FAKE_AGENT_LOG_ANTHROPIC_API_KEY="1" FAKE_TMUX_STATE_DIR="$tmux_state" \
+  "$AP_BIN" start AnthropicEnvProject >"$stdout_anthropic"
+anthropic_run_dir="$(latest_run_dir "$home2/.autopilot/projects/AnthropicEnvProject")"
+assert_file_contains "$stdout_anthropic" "completed task: anthropic env task"
+assert_file_contains "$anthropic_run_dir/stdout.log" "anthropic_api_key:"
+assert_file_not_contains "$anthropic_run_dir/stdout.log" "anthropic_api_key:dummy-key"
+assert_file_contains "$anthropic_run_dir/prompt.txt" "あなたは autopilot project 'AnthropicEnvProject' の coder エージェントです。"
+assert_file_contains "$anthropic_run_dir/prompt.txt" "思考は日本語で行い、ユーザー向けの出力も日本語で行ってください。"
+
 echo "[test] review approve keeps TODO pending until reviewer and records reviewer run"
 review_approve_repo="$TMP_DIR/repo-review-approve"
 mkdir -p "$review_approve_repo"
@@ -498,6 +518,7 @@ assert_file_contains "${review_ok_runs[0]}/meta.json" "\"agent\": \"coder.claude
 assert_file_contains "${review_ok_runs[1]}/meta.json" "\"role\": \"reviewer\""
 assert_file_contains "${review_ok_runs[1]}/meta.json" "\"agent\": \"reviewer.claude\""
 assert_file_contains "${review_ok_runs[1]}/meta.json" "\"coder_run_id\": \"$review_ok_coder_run_id\""
+assert_file_contains "${review_ok_runs[1]}/prompt.txt" "思考は日本語で行ってください。summary / issues / suggestions / reason も日本語で記述してください。"
 assert_file_contains "$home2/.autopilot/projects/ReviewApproveProject/runtime/events/events.jsonl" "\"type\": \"review.approved\""
 
 echo "[test] review rework returns task to todo and stores feedback"

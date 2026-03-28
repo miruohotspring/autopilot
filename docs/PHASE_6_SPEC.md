@@ -39,12 +39,14 @@
 - interrupted な reviewer run は coder を再実行せず安全側に倒して回復できる
 - review フロー有効時は、`TODO.md` の完了反映を `review.approved` まで遅延できる
 - review 関連 event（`review.started`, `review.comment`, `review.approved`, `review.rework_requested`, `review.blocked`）が記録される
+- public workflow CLI（`ap task/run/review/recover`）から同じ state transition を操作できる
+- manual workflow CLI では `human` actor を指定できる
 
 ### 2.2 非ゴール
 
 - task 自動生成（Phase 7）
 - 複数 reviewer の並列実行
-- 人間レビュアーによる承認ワークフロー（human approval は別概念として管理）
+- `ap start` からの `human` actor 自動統合
 - GitHub PR との連携
 - reviewer の出力の自動適用（コード修正の自動マージ等）
 - 常駐型 reviewer プロセス
@@ -194,9 +196,9 @@ reviewer run の `exit_reason` は少なくとも以下を取りうる。
 
 ### 6.2 reviewer agent の種別
 
-reviewer は `reviewer.claude` として識別する。
+reviewer は `reviewer.<actor>` として識別する。
 
-これは run meta / event 上の論理的な agent 識別子であり、実際の実行 CLI は既存の `claude` を使う。出力形式も coder と同様に `--output-format stream-json` を前提とする。
+これは run meta / event 上の論理的な agent 識別子である。`ap start` では CLI-backed actor を spawn し、manual workflow CLI では `human` を publish-only actor として扱う。
 
 `agent_launcher` に以下の agent 種別を追加する。
 
@@ -204,9 +206,12 @@ reviewer は `reviewer.claude` として識別する。
 |---|---|
 | `coder.claude` | 実装担当 claude（既存） |
 | `coder.codex` | 実装担当 codex（既存） |
-| `reviewer.claude` | レビュー担当 claude（Phase 6 新規） |
+| `coder.human` | manual workflow 用の人間 coder |
+| `reviewer.claude` | レビュー担当 claude |
+| `reviewer.codex` | レビュー担当 codex |
+| `reviewer.human` | manual workflow 用の人間 reviewer |
 
-Phase 6 では `reviewer.codex` は対象外とする。reviewer は自然言語での判断が主なタスクであり、claude が適切である。
+現行実装では `ap start` からは `claude` / `codex` を spawn 対象とし、`human` は `ap run start`, `ap run finish`, `ap review start`, `ap review submit` で使う。
 
 ### 6.3 reviewer run の publish 境界
 
@@ -741,26 +746,44 @@ Phase 6 では `project.json` に以下を追加する。
 
 task 個別の `max_review_cycles` が `null` または未設定の場合は `project.json` の値を使う。
 
-## 13. `ap start` の CLI 変更
+## 13. CLI 変更
 
-### 13.1 新規フラグ
+### 13.1 `ap start` の新規フラグ
 
 ```
-ap start [project_name] [--review] [--no-review] [--timeout <seconds>]
+ap start [project_name] [--review] [--no-review] [--reviewer-agent <agent>] [--timeout <seconds>]
 ```
 
 | フラグ | 説明 |
 |---|---|
 | `--review` | review フローを有効化（project 設定を上書き） |
 | `--no-review` | review フローを無効化（project 設定を上書き） |
+| `--reviewer-agent <agent>` | reviewer actor を上書きする |
 
 `--review` と `--no-review` が同時に指定された場合は `--review` が優先される。
 
-### 13.2 フラグの優先順位まとめ
+### 13.2 review フラグの優先順位まとめ
 
 ```
 task.skip_review > task.review_required > --review > --no-review > project.review_enabled > デフォルト（false）
 ```
+
+### 13.3 public workflow CLI
+
+現行実装では、`ap start` に加えて以下の workflow CLI を public contract として提供する。
+
+```text
+ap task sync [project_name]
+ap task next [project_name]
+ap task set-status <task_id> --status <status> [-p <project_name>]
+ap recover [project_name]
+ap run start [project_name] [--task <task_id>] [--actor <actor>]
+ap run finish <run_id> --status <done|failed|blocked|timeout|cancelled> [--review] [--no-review]
+ap review start <coder_run_id> [--actor <actor>]
+ap review submit <reviewer_run_id> --verdict <approve|rework|blocked>
+```
+
+これらは `ap start` と同じ state machine を共有する public な workflow surface であり、manual operation や `human` actor の運用に使う。
 
 ## 14. 推奨実装単位
 

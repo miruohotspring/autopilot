@@ -63,7 +63,7 @@ std::string build_agent_shell_command(const std::string& agent_name, const std::
            shell_quote(prompt);
   }
   if (agent_name == "claude") {
-    return shell_quote(agent_name) +
+    return "env -u ANTHROPIC_API_KEY " + shell_quote(agent_name) +
            " -p --output-format stream-json --verbose --dangerously-skip-permissions " +
            shell_quote(prompt);
   }
@@ -161,13 +161,15 @@ int decode_system_exit_code(const int system_status) {
 
 } // namespace
 
-std::string resolve_agent_name() {
+std::string resolve_agent_name(const bool allow_human) {
   const std::optional<std::string> configured_agent = load_configured_agent();
   if (configured_agent.has_value()) {
-    if (*configured_agent != "claude" && *configured_agent != "codex") {
+    if (*configured_agent != "claude" && *configured_agent != "codex" &&
+        (!allow_human || *configured_agent != "human")) {
       throw std::runtime_error("unsupported agent in config.toml: " + *configured_agent);
     }
-    if (!find_executable_in_path(*configured_agent).has_value()) {
+    if (*configured_agent != "human" &&
+        !find_executable_in_path(*configured_agent).has_value()) {
       throw std::runtime_error("configured agent CLI not found: " + *configured_agent);
     }
     return *configured_agent;
@@ -183,17 +185,19 @@ std::string resolve_agent_name() {
 
 std::string resolve_reviewer_agent_name(
     const std::optional<std::string>& cli_override,
-    const std::string& coder_agent_name) {
+    const std::string& coder_agent_name,
+    const bool allow_human) {
   std::string resolved;
   if (cli_override.has_value()) {
     resolved = *cli_override;
   } else {
     resolved = load_configured_start_string("reviewer_agent").value_or(coder_agent_name);
   }
-  if (resolved != "claude" && resolved != "codex") {
+  if (resolved != "claude" && resolved != "codex" &&
+      (!allow_human || resolved != "human")) {
     throw std::runtime_error("unsupported reviewer agent: " + resolved);
   }
-  if (!find_executable_in_path(resolved).has_value()) {
+  if (resolved != "human" && !find_executable_in_path(resolved).has_value()) {
     throw std::runtime_error("reviewer agent CLI not found: " + resolved);
   }
   return resolved;

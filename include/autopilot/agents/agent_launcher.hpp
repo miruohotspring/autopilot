@@ -9,10 +9,11 @@ struct AgentLaunchResult {
   int exit_code;
 };
 
-std::string resolve_agent_name();
+std::string resolve_agent_name(bool allow_human = true);
 std::string resolve_reviewer_agent_name(
     const std::optional<std::string>& cli_override,
-    const std::string& coder_agent_name);
+    const std::string& coder_agent_name,
+    bool allow_human = true);
 std::string build_agent_shell_command(const std::string& agent_name, const std::string& prompt);
 
 AgentLaunchResult run_agent(
