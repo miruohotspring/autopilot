@@ -44,6 +44,41 @@ struct SelectedProjectPath {
   fs::path path;
 };
 
+struct RunMetaData {
+  std::string run_id;
+  std::string task_id;
+  int attempt_number = 0;
+  std::string project;
+  std::string task_title;
+  std::string task_source_file;
+  std::size_t task_source_line = 0;
+  std::string task_original_line;
+  std::string path_name;
+  std::string working_directory;
+  std::string agent;
+  std::string role = "coder";
+  std::string status;
+  std::string started_at;
+  std::optional<std::string> ended_at;
+  std::optional<int> exit_code;
+  std::optional<std::string> exit_reason;
+  std::optional<std::string> coder_run_id;
+  std::optional<int> review_cycle;
+  std::optional<std::string> verdict;
+};
+
+struct ReviewerVerdict {
+  std::string verdict;
+  std::optional<std::string> summary;
+  std::vector<std::string> issues;
+  std::vector<std::string> suggestions;
+  std::optional<std::string> reason;
+  std::optional<std::string> category;
+};
+
+std::optional<RunMetaData> parse_run_meta_file(const fs::path& meta_file);
+TaskState* find_task_by_id(std::vector<TaskState>& tasks, const std::string& task_id);
+
 std::string shell_quote(const std::string& s) {
   std::string quoted = "'";
   for (const char ch : s) {
@@ -55,6 +90,34 @@ std::string shell_quote(const std::string& s) {
   }
   quoted.push_back('\'');
   return quoted;
+}
+
+std::string trim_ascii_whitespace(const std::string& s) {
+  const std::size_t begin = s.find_first_not_of(" \t\r\n");
+  if (begin == std::string::npos) {
+    return "";
+  }
+  const std::size_t end = s.find_last_not_of(" \t\r\n");
+  return s.substr(begin, end - begin + 1);
+}
+
+std::string strip_known_agent_prefix(const std::string& line) {
+  for (const std::string prefix : {"claude:", "codex:"}) {
+    if (line.rfind(prefix, 0) == 0) {
+      return trim_ascii_whitespace(line.substr(prefix.size()));
+    }
+  }
+  return line;
+}
+
+bool nullable_integer_field_is_null(const std::string& json, const std::string& key) {
+  const std::string pattern = "\"" + key + "\":";
+  std::size_t pos = json.find(pattern);
+  if (pos == std::string::npos) {
+    return false;
+  }
+  pos = json.find_first_not_of(" \t\r\n", pos + pattern.size());
+  return pos != std::string::npos && json.compare(pos, 4, "null") == 0;
 }
 
 std::string current_timestamp_with_offset() {
@@ -121,12 +184,115 @@ std::string build_prompt(
   return oss.str();
 }
 
+std::string build_reviewer_prompt(
+    const TaskState& task,
+    const std::string& coder_run_id,
+    const std::string& coder_exit_reason,
+    const std::string& coder_stdout) {
+  std::ostringstream oss;
+  oss << "あなたは autopilot の reviewer エージェントです。\n";
+  oss << "以下のタスクの実装結果をレビューし、verdict を JSON で返してください。\n\n";
+  oss << "## タスク情報\n";
+  oss << "- ID: " << task.id << "\n";
+  oss << "- タイトル: " << task.title << "\n";
+  oss << "- 説明: " << task.description.value_or("") << "\n\n";
+  oss << "## coder の実行結果\n";
+  oss << "- run ID: " << coder_run_id << "\n";
+  oss << "- exit reason: " << coder_exit_reason << "\n\n";
+  oss << "## coder の出力（stdout）\n";
+  oss << coder_stdout << "\n\n";
+  oss << "必ず stdout の最後に以下のいずれか 1 つの JSON を出力してください。\n";
+  oss << "{\"verdict\": \"approve\", \"summary\": \"承認理由の要約\"}\n";
+  oss << "{\"verdict\": \"rework\", \"issues\": [\"問題点1\"], \"suggestions\": [\"改善案1\"]}\n";
+  oss << "{\"verdict\": \"blocked\", \"reason\": \"ブロック理由\", "
+         "\"category\": \"spec_conflict|human_required|external_dependency|other\"}\n";
+  return oss.str();
+}
+
+std::string read_text_file(const fs::path& path) {
+  std::ifstream in(path);
+  if (!in) {
+    throw std::runtime_error("failed to read file: " + path.string());
+  }
+  std::ostringstream oss;
+  oss << in.rdbuf();
+  return oss.str();
+}
+
 void write_text_file(const fs::path& path, const std::string& content) {
   std::ofstream out(path, std::ios::trunc);
   if (!out) {
     throw std::runtime_error("failed to write file: " + path.string());
   }
   out << content;
+}
+
+std::vector<std::string> extract_json_objects(const std::string& text) {
+  std::vector<std::string> objects;
+  int depth = 0;
+  bool in_string = false;
+  bool escaped = false;
+  std::size_t start = std::string::npos;
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    const char ch = text[i];
+    if (in_string) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch == '\\') {
+        escaped = true;
+      } else if (ch == '"') {
+        in_string = false;
+      }
+      continue;
+    }
+
+    if (ch == '"') {
+      in_string = true;
+      continue;
+    }
+    if (ch == '{') {
+      if (depth == 0) {
+        start = i;
+      }
+      ++depth;
+      continue;
+    }
+    if (ch == '}') {
+      if (depth == 0) {
+        continue;
+      }
+      --depth;
+      if (depth == 0 && start != std::string::npos) {
+        objects.push_back(text.substr(start, i - start + 1));
+        start = std::string::npos;
+      }
+    }
+  }
+  return objects;
+}
+
+std::optional<ReviewerVerdict> parse_reviewer_verdict(const std::string& normalized_output) {
+  const std::vector<std::string> objects = extract_json_objects(normalized_output);
+  for (auto it = objects.rbegin(); it != objects.rend(); ++it) {
+    if (it->find("\"verdict\"") == std::string::npos) {
+      continue;
+    }
+    ReviewerVerdict verdict;
+    verdict.verdict = json_read_required_string(*it, "verdict");
+    if (verdict.verdict != "approve" && verdict.verdict != "rework" &&
+        verdict.verdict != "blocked") {
+      throw std::runtime_error("invalid reviewer verdict");
+    }
+    verdict.summary = json_read_optional_string(*it, "summary");
+    verdict.issues = json_read_optional_string_array(*it, "issues").value_or(
+        std::vector<std::string>{});
+    verdict.suggestions = json_read_optional_string_array(*it, "suggestions").value_or(
+        std::vector<std::string>{});
+    verdict.reason = json_read_optional_string(*it, "reason");
+    verdict.category = json_read_optional_string(*it, "category");
+    return verdict;
+  }
+  return std::nullopt;
 }
 
 SelectedProjectPath resolve_project_path(
@@ -389,6 +555,28 @@ AgentLaunchResult run_agent_in_tmux(
   return AgentLaunchResult{agent_name, exit_code};
 }
 
+AgentLaunchResult run_agent_with_timeout(
+    const std::string& agent_name,
+    const std::string& prompt,
+    const fs::path& working_directory,
+    const fs::path& stdout_log,
+    const fs::path& stderr_log,
+    const fs::path& timeout_marker_file,
+    int timeout_seconds) {
+  const std::string base_cmd = build_logged_agent_command(
+      agent_name,
+      prompt,
+      working_directory,
+      " >" + shell_quote(stdout_log.string()),
+      " 2>" + shell_quote(stderr_log.string()));
+  const std::string wrapped_command =
+      "set +e; " +
+      build_timed_shell_fragment(base_cmd, timeout_marker_file, timeout_seconds) +
+      "; exit \"$status\"";
+  const pid_t runner_pid = launch_bash_command_async(wrapped_command);
+  return AgentLaunchResult{agent_name, wait_for_process(runner_pid)};
+}
+
 std::string resolve_project_name(const std::optional<std::string>& maybe_project_name) {
   if (!autopilot_dir_exists()) {
     throw std::runtime_error("Please run ap init first");
@@ -421,41 +609,127 @@ std::string resolve_project_name(const std::optional<std::string>& maybe_project
   return *selected_project;
 }
 
-std::string build_meta_json(
+std::string build_meta_json(const RunMetaData& meta) {
+  std::ostringstream oss;
+  oss << "{\n";
+  oss << "  \"id\": " << json_string(meta.run_id) << ",\n";
+  oss << "  \"run_id\": " << json_string(meta.run_id) << ",\n";
+  oss << "  \"task_id\": " << json_string(meta.task_id) << ",\n";
+  oss << "  \"attempt\": " << meta.attempt_number << ",\n";
+  oss << "  \"attempt_number\": " << meta.attempt_number << ",\n";
+  oss << "  \"project\": " << json_string(meta.project) << ",\n";
+  oss << "  \"task_title\": " << json_string(meta.task_title) << ",\n";
+  oss << "  \"task_source_file\": " << json_string(meta.task_source_file) << ",\n";
+  oss << "  \"task_source_line\": " << meta.task_source_line << ",\n";
+  oss << "  \"task_original_line\": " << json_string(meta.task_original_line) << ",\n";
+  oss << "  \"path_name\": " << json_string(meta.path_name) << ",\n";
+  oss << "  \"working_directory\": " << json_string(meta.working_directory) << ",\n";
+  oss << "  \"agent\": " << json_string(meta.agent) << ",\n";
+  oss << "  \"role\": " << json_string(meta.role) << ",\n";
+  oss << "  \"status\": " << json_string(meta.status) << ",\n";
+  oss << "  \"started_at\": " << json_string(meta.started_at) << ",\n";
+  oss << "  \"ended_at\": " << json_nullable_string(meta.ended_at) << ",\n";
+  oss << "  \"exit_code\": ";
+  if (meta.exit_code.has_value()) {
+    oss << *meta.exit_code;
+  } else {
+    oss << "null";
+  }
+  oss << ",\n";
+  oss << "  \"exit_reason\": " << json_nullable_string(meta.exit_reason);
+  if (meta.coder_run_id.has_value()) {
+    oss << ",\n  \"coder_run_id\": " << json_string(*meta.coder_run_id);
+  }
+  if (meta.review_cycle.has_value()) {
+    oss << ",\n  \"review_cycle\": " << *meta.review_cycle;
+  }
+  if (meta.verdict.has_value()) {
+    oss << ",\n  \"verdict\": " << json_string(*meta.verdict);
+  }
+  oss << "\n}\n";
+  return oss.str();
+}
+
+RunMetaData build_run_meta_data(
     const std::string& run_id,
     const std::string& project_name,
     const TaskState& task,
     const SelectedProjectPath& selected_path,
-    const std::string& agent_name,
+    const std::string& logical_agent_name,
+    const std::string& role,
     const int attempt_number,
     const std::string& status,
     const std::string& started_at,
     const std::optional<std::string>& ended_at,
-    const std::optional<int>& exit_code) {
-  std::ostringstream oss;
-  oss << "{\n";
-  oss << "  \"run_id\": " << json_string(run_id) << ",\n";
-  oss << "  \"task_id\": " << json_string(task.id) << ",\n";
-  oss << "  \"attempt_number\": " << attempt_number << ",\n";
-  oss << "  \"project\": " << json_string(project_name) << ",\n";
-  oss << "  \"task_title\": " << json_string(task.title) << ",\n";
-  oss << "  \"task_source_file\": " << json_string(task.source_file) << ",\n";
-  oss << "  \"task_source_line\": " << task.source_line << ",\n";
-  oss << "  \"task_original_line\": " << json_string(task.source_text) << ",\n";
-  oss << "  \"path_name\": " << json_string(selected_path.name) << ",\n";
-  oss << "  \"working_directory\": " << json_string(selected_path.path.string()) << ",\n";
-  oss << "  \"agent\": " << json_string(agent_name) << ",\n";
-  oss << "  \"status\": " << json_string(status) << ",\n";
-  oss << "  \"started_at\": " << json_string(started_at) << ",\n";
-  oss << "  \"ended_at\": " << json_nullable_string(ended_at) << ",\n";
-  oss << "  \"exit_code\": ";
-  if (exit_code.has_value()) {
-    oss << *exit_code;
-  } else {
-    oss << "null";
+    const std::optional<int>& exit_code,
+    const std::optional<std::string>& exit_reason,
+    const std::optional<std::string>& coder_run_id = std::nullopt,
+    const std::optional<int>& review_cycle = std::nullopt,
+    const std::optional<std::string>& verdict = std::nullopt) {
+  RunMetaData meta;
+  meta.run_id = run_id;
+  meta.task_id = task.id;
+  meta.attempt_number = attempt_number;
+  meta.project = project_name;
+  meta.task_title = task.title;
+  meta.task_source_file = task.source_file;
+  meta.task_source_line = task.source_line;
+  meta.task_original_line = task.source_text;
+  meta.path_name = selected_path.name;
+  meta.working_directory = selected_path.path.string();
+  meta.agent = logical_agent_name;
+  meta.role = role;
+  meta.status = status;
+  meta.started_at = started_at;
+  meta.ended_at = ended_at;
+  meta.exit_code = exit_code;
+  meta.exit_reason = exit_reason;
+  meta.coder_run_id = coder_run_id;
+  meta.review_cycle = review_cycle;
+  meta.verdict = verdict;
+  return meta;
+}
+
+std::optional<RunMetaData> parse_run_meta_file(const fs::path& meta_file) {
+  if (!fs::exists(meta_file)) {
+    return std::nullopt;
   }
-  oss << "\n}\n";
-  return oss.str();
+
+  const std::string json = read_text_file(meta_file);
+  RunMetaData meta;
+  meta.run_id = json_read_optional_string(json, "id")
+                    .value_or(json_read_required_string(json, "run_id"));
+  meta.task_id = json_read_required_string(json, "task_id");
+  meta.attempt_number =
+      static_cast<int>(json_read_optional_integer(json, "attempt").value_or(
+          json_read_optional_integer(json, "attempt_number").value_or(0)));
+  meta.project = json_read_required_string(json, "project");
+  meta.task_title = json_read_required_string(json, "task_title");
+  meta.task_source_file = json_read_required_string(json, "task_source_file");
+  meta.task_source_line =
+      static_cast<std::size_t>(json_read_required_integer(json, "task_source_line"));
+  meta.task_original_line = json_read_required_string(json, "task_original_line");
+  meta.path_name = json_read_required_string(json, "path_name");
+  meta.working_directory = json_read_required_string(json, "working_directory");
+  meta.agent = json_read_required_string(json, "agent");
+  meta.role = json_read_optional_string(json, "role").value_or("coder");
+  meta.status = json_read_required_string(json, "status");
+  meta.started_at = json_read_required_string(json, "started_at");
+  meta.ended_at = json_read_optional_string(json, "ended_at");
+  if (!nullable_integer_field_is_null(json, "exit_code")) {
+    if (const std::optional<long long> exit_code = json_read_optional_integer(json, "exit_code");
+        exit_code.has_value()) {
+      meta.exit_code = static_cast<int>(*exit_code);
+    }
+  }
+  meta.exit_reason = json_read_optional_string(json, "exit_reason");
+  meta.coder_run_id = json_read_optional_string(json, "coder_run_id");
+  if (const std::optional<long long> review_cycle = json_read_optional_integer(json, "review_cycle");
+      review_cycle.has_value()) {
+    meta.review_cycle = static_cast<int>(*review_cycle);
+  }
+  meta.verdict = json_read_optional_string(json, "verdict");
+  return meta;
 }
 
 std::string build_result_json(
@@ -493,8 +767,23 @@ std::string build_result_json(
   return oss.str();
 }
 
-std::vector<TaskStatusChange> recover_stale_in_progress_tasks(
-    std::vector<TaskState>& tasks, const std::string& recovered_at) {
+void finalize_interrupted_reviewer_run(
+    const fs::path& runs_dir,
+    const RunMetaData& meta,
+    const std::string& ended_at) {
+  if (meta.status != "starting" && meta.status != "running") {
+    return;
+  }
+
+  RunMetaData finished_meta = meta;
+  finished_meta.status = "finished";
+  finished_meta.ended_at = ended_at;
+  finished_meta.exit_reason = "internal_error";
+  write_text_file(runs_dir / meta.run_id / "meta.json", build_meta_json(finished_meta));
+}
+
+std::vector<TaskStatusChange> recover_stale_tasks(
+    std::vector<TaskState>& tasks, const fs::path& runs_dir, const std::string& recovered_at) {
   std::vector<TaskStatusChange> changes;
   for (TaskState& task : tasks) {
     if (task.status != "in_progress") {
@@ -508,6 +797,61 @@ std::vector<TaskStatusChange> recover_stale_in_progress_tasks(
     task.blocker_category = std::nullopt;
     task.updated_at = recovered_at;
   }
+
+  for (TaskState& task : tasks) {
+    if (task.status != "review_pending") {
+      continue;
+    }
+    if (task.reviewer_run_id.has_value()) {
+      if (const std::optional<RunMetaData> meta =
+              parse_run_meta_file(runs_dir / *task.reviewer_run_id / "meta.json");
+          meta.has_value() && meta->role == "reviewer") {
+        finalize_interrupted_reviewer_run(runs_dir, *meta, recovered_at);
+        task.latest_run_id = meta->run_id;
+        task.reviewer_run_id = meta->run_id;
+      }
+    }
+    changes.push_back(TaskStatusChange{task.id, task.status, "blocked"});
+    task.status = "blocked";
+    task.last_run_exit_reason = "internal_error";
+    task.review_result = "reviewer_error";
+    task.last_error = "previous reviewer run did not finish cleanly";
+    task.blocker_reason = "previous reviewer run did not finish cleanly";
+    task.blocker_category = "reviewer_error";
+    task.updated_at = recovered_at;
+  }
+
+  for (const auto& entry : fs::directory_iterator(runs_dir)) {
+    if (!entry.is_directory()) {
+      continue;
+    }
+    const std::optional<RunMetaData> meta = parse_run_meta_file(entry.path() / "meta.json");
+    if (!meta.has_value() || meta->role != "reviewer") {
+      continue;
+    }
+    if (meta->status != "starting" && meta->status != "running") {
+      continue;
+    }
+    TaskState* task = find_task_by_id(tasks, meta->task_id);
+    if (task == nullptr) {
+      continue;
+    }
+    if (task->latest_run_id == meta->run_id || task->reviewer_run_id == meta->run_id) {
+      continue;
+    }
+    finalize_interrupted_reviewer_run(runs_dir, *meta, recovered_at);
+    changes.push_back(TaskStatusChange{task->id, task->status, "blocked"});
+    task->status = "blocked";
+    task->latest_run_id = meta->run_id;
+    task->reviewer_run_id = meta->run_id;
+    task->last_run_exit_reason = "internal_error";
+    task->review_result = "reviewer_error";
+    task->last_error = "previous reviewer run did not finish cleanly";
+    task->blocker_reason = "previous reviewer run did not finish cleanly";
+    task->blocker_category = "reviewer_error";
+    task->updated_at = recovered_at;
+  }
+
   return changes;
 }
 
@@ -656,6 +1000,38 @@ bool task_matches_selected_path(const TaskState& task, const std::string& select
          task.related_paths.end();
 }
 
+std::string coder_logical_agent_name(const std::string& agent_name) {
+  return "coder." + agent_name;
+}
+
+std::string reviewer_logical_agent_name() {
+  return "reviewer.claude";
+}
+
+bool review_flow_enabled_for_task(
+    const TaskState& task,
+    const ProjectState& project_state,
+    const std::optional<bool>& maybe_review_enabled) {
+  if (task.skip_review) {
+    return false;
+  }
+  if (task.review_required) {
+    return true;
+  }
+  if (maybe_review_enabled.has_value()) {
+    return *maybe_review_enabled;
+  }
+  return project_state.review_enabled;
+}
+
+int effective_max_review_cycles(const TaskState& task, const ProjectState& project_state) {
+  return task.max_review_cycles.value_or(project_state.max_review_cycles);
+}
+
+std::string reviewer_failure_exit_reason(const int exit_code) {
+  return exit_code >= 128 ? "signal" : "non_zero_exit";
+}
+
 int runnable_status_rank(const TaskState& task) {
   return task.status == "todo" ? 0 : 1;
 }
@@ -723,6 +1099,10 @@ ProjectState build_project_state(
                             : (previous_state.has_value() ? previous_state->last_run_at : std::nullopt);
   project.run_counter = run_counter;
   project.default_timeout_seconds = default_timeout_seconds;
+  project.review_enabled =
+      previous_state.has_value() ? previous_state->review_enabled : false;
+  project.max_review_cycles =
+      previous_state.has_value() ? previous_state->max_review_cycles : 2;
   project.task_counts = compute_project_task_counts(tasks);
   project.updated_at = updated_at;
   return project;
@@ -834,7 +1214,8 @@ std::string completed_todo_line(const std::string& line) {
 
 int cmd_start(
     const std::optional<std::string>& maybe_project_name,
-    std::optional<int> maybe_timeout_seconds) {
+    std::optional<int> maybe_timeout_seconds,
+    std::optional<bool> maybe_review_enabled) {
   try {
     const std::string project_name = resolve_project_name(maybe_project_name);
     const fs::path project_dir = project_dir_path(project_name);
@@ -905,6 +1286,22 @@ int cmd_start(
         existing_tasks.begin(),
         existing_tasks.end(),
         [](const TaskState& task) { return task.status == "in_progress"; });
+    const bool has_existing_review_pending = std::any_of(
+        existing_tasks.begin(),
+        existing_tasks.end(),
+        [](const TaskState& task) { return task.status == "review_pending"; });
+    bool has_orphaned_reviewer_run = false;
+    for (const auto& entry : fs::directory_iterator(runs_dir)) {
+      if (!entry.is_directory()) {
+        continue;
+      }
+      const std::optional<RunMetaData> meta = parse_run_meta_file(entry.path() / "meta.json");
+      if (meta.has_value() && meta->role == "reviewer" &&
+          (meta->status == "starting" || meta->status == "running")) {
+        has_orphaned_reviewer_run = true;
+        break;
+      }
+    }
 
     auto append_retry_exhausted_events = [&]() {
       for (const TaskState& task : sync_result.tasks) {
@@ -1024,7 +1421,7 @@ int cmd_start(
 
     std::vector<TaskStatusChange> recovered_in_progress_changes;
     bool sync_state_persisted = false;
-    if (has_existing_in_progress) {
+    if (has_existing_in_progress || has_existing_review_pending || has_orphaned_reviewer_run) {
       LockManager sync_lock_manager(lock_dir);
       bool sync_lock_was_stale = false;
       LockInfo sync_stale_info{};
@@ -1058,7 +1455,7 @@ int cmd_start(
       }
 
       try {
-        recovered_in_progress_changes = recover_stale_in_progress_tasks(sync_result.tasks, synced_at);
+        recovered_in_progress_changes = recover_stale_tasks(sync_result.tasks, runs_dir, synced_at);
         append_retry_exhausted_events();
         persist_sync_state(recovered_in_progress_changes);
         sync_state_persisted = true;
@@ -1082,6 +1479,7 @@ int cmd_start(
     }
 
     const std::string agent_name = resolve_agent_name();
+    const std::string coder_agent = coder_logical_agent_name(agent_name);
 
     // Generate run_id using the incremented run_counter
     ++run_counter;
@@ -1196,6 +1594,8 @@ int cmd_start(
         started_at);
     AgentLaunchResult launch_result{agent_name, 1};
     bool launch_started = false;
+    const bool review_enabled_for_task =
+        review_flow_enabled_for_task(*selected_task, project_state, maybe_review_enabled);
     const std::string prompt = build_prompt(project_name, selected_path, *selected_task);
     std::chrono::steady_clock::time_point started_clock;
     try {
@@ -1230,17 +1630,19 @@ int cmd_start(
       write_text_file(prompt_file, prompt);
       write_text_file(
           meta_file,
-          build_meta_json(
+          build_meta_json(build_run_meta_data(
               run_id,
               project_name,
               *selected_task,
               selected_path,
-              agent_name,
+              coder_agent,
+              "coder",
               selected_task->attempt_count,
               "running",
               started_at,
               std::nullopt,
-              std::nullopt));
+              std::nullopt,
+              std::nullopt)));
       event_log.append(
           project_name,
           EventRecord{
@@ -1249,13 +1651,14 @@ int cmd_start(
               "run.started",
               "ap.start",
               {
-                  EventPayloadField{"agent", json_string(agent_name)},
+                  EventPayloadField{"agent", json_string(coder_agent)},
                   EventPayloadField{"path_name", json_string(selected_path.name)},
                   EventPayloadField{
                       "working_directory",
                       json_string(selected_path.path.string()),
                   },
                   EventPayloadField{"attempt", std::to_string(selected_task->attempt_count)},
+                  EventPayloadField{"role", json_string("coder")},
               },
           });
 
@@ -1314,6 +1717,9 @@ int cmd_start(
       throw;
     }
 
+    lock_manager.transfer_project_lock_pid(static_cast<int>(::getpid()));
+    lock_manager.transfer_task_lock_pid(selected_task->id, static_cast<int>(::getpid()));
+
     const auto ended_clock = std::chrono::steady_clock::now();
     const std::string ended_at = current_timestamp_with_offset();
     const long long duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1363,27 +1769,30 @@ int cmd_start(
         classification = classify_run_result(launch_result.exit_code, stdout_file, stderr_file);
       }
 
-      succeeded = classification.final_task_status == "done";
-      blocked = classification.final_task_status == "blocked";
+      const bool coder_succeeded = classification.final_task_status == "done";
+      const bool coder_blocked = classification.final_task_status == "blocked";
+      const bool should_run_review = coder_succeeded && review_enabled_for_task;
+      succeeded = coder_succeeded && !should_run_review;
+      blocked = coder_blocked;
 
       if (!timed_out) {
-        if (succeeded) {
+        if (coder_succeeded) {
           exit_reason = "done";
-        } else if (blocked) {
+        } else if (coder_blocked) {
           exit_reason = "blocked";
         } else {
           exit_reason = "failed";
         }
       }
 
-      selected_task->status = classification.final_task_status;
+      selected_task->status = should_run_review ? "review_pending" : classification.final_task_status;
       selected_task->last_run_exit_reason = exit_reason;
       selected_task->updated_at = ended_at;
-      if (classification.final_task_status == "done") {
+      if (should_run_review || classification.final_task_status == "done") {
         selected_task->last_error = std::nullopt;
         selected_task->blocker_reason = std::nullopt;
         selected_task->blocker_category = std::nullopt;
-      } else if (blocked) {
+      } else if (coder_blocked) {
         selected_task->last_error = classification.blocker_reason;
         selected_task->blocker_reason = classification.blocker_reason;
         selected_task->blocker_category = classification.blocker_category;
@@ -1397,7 +1806,7 @@ int cmd_start(
         selected_task->blocker_category = std::nullopt;
       } else {
         selected_task->last_error =
-            std::optional<std::string>("agent exited with status " +
+          std::optional<std::string>("agent exited with status " +
                                        std::to_string(launch_result.exit_code));
         selected_task->blocker_reason = std::nullopt;
         selected_task->blocker_category = std::nullopt;
@@ -1417,7 +1826,7 @@ int cmd_start(
           ended_at);
       save_project_state(project_state_file, project_state);
 
-      if (succeeded) {
+      if (coder_succeeded && !should_run_review) {
         todo_update_applied = mark_todo_task_done(
             todo_file,
             TodoTaskSelection{
@@ -1445,30 +1854,32 @@ int cmd_start(
 
       write_text_file(
           meta_file,
-          build_meta_json(
+          build_meta_json(build_run_meta_data(
               run_id,
               project_name,
               *selected_task,
               selected_path,
-              launch_result.agent_name,
+              coder_agent,
+              "coder",
               selected_task->attempt_count,
-              classification.process_status,
+              "finished",
               started_at,
               ended_at,
-              launch_result.exit_code));
+              launch_result.exit_code,
+              exit_reason)));
 
       event_log.append_stream_file(
           project_name,
           selected_task->id,
           run_id,
-          "agent." + launch_result.agent_name,
+          "agent." + coder_agent,
           "stdout",
           stdout_file);
       event_log.append_stream_file(
           project_name,
           selected_task->id,
           run_id,
-          "agent." + launch_result.agent_name,
+          "agent." + coder_agent,
           "stderr",
           stderr_file);
 
@@ -1480,7 +1891,8 @@ int cmd_start(
               "run.finished",
               "ap.start",
               {
-                  EventPayloadField{"agent", json_string(launch_result.agent_name)},
+                  EventPayloadField{"agent", json_string(coder_agent)},
+                  EventPayloadField{"role", json_string("coder")},
                   EventPayloadField{"exit_code", std::to_string(launch_result.exit_code)},
                   EventPayloadField{"duration_ms", std::to_string(duration_ms)},
               },
@@ -1551,7 +1963,7 @@ int cmd_start(
           ended_at,
           duration_ms,
           todo_update_applied,
-          classification.final_task_status,
+          selected_task->status,
           classification.summary_excerpt,
           classification.blocker_reason,
           created_alert.has_value() ? std::optional<std::string>(created_alert->id) : std::nullopt);
@@ -1576,7 +1988,7 @@ int cmd_start(
               {
                   EventPayloadField{
                       "final_task_status",
-                      json_string(classification.final_task_status),
+                      json_string(selected_task->status),
                   },
                   EventPayloadField{
                       "process_exit_code",
@@ -1603,6 +2015,657 @@ int cmd_start(
                   },
               },
           });
+
+      if (should_run_review) {
+        ++run_counter;
+        const std::string reviewer_run_id = allocate_run_id_with_counter(runs_dir, run_counter);
+        const fs::path reviewer_run_dir = runs_dir / reviewer_run_id;
+        fs::create_directories(reviewer_run_dir);
+        const fs::path reviewer_meta_file = reviewer_run_dir / "meta.json";
+        const fs::path reviewer_prompt_file = reviewer_run_dir / "prompt.txt";
+        const fs::path reviewer_stdout_file = reviewer_run_dir / "stdout.log";
+        const fs::path reviewer_stderr_file = reviewer_run_dir / "stderr.log";
+        const fs::path reviewer_result_file = reviewer_run_dir / "result.json";
+        const fs::path reviewer_timeout_marker_file = reviewer_run_dir / "agent.timeout";
+        const std::string reviewer_started_at = current_timestamp_with_offset();
+        const int review_cycle = selected_task->review_cycle_count + 1;
+        const std::string reviewer_prompt =
+            build_reviewer_prompt(*selected_task, run_id, exit_reason, read_text_file(stdout_file));
+
+        write_text_file(reviewer_prompt_file, reviewer_prompt);
+        write_text_file(
+            reviewer_meta_file,
+            build_meta_json(build_run_meta_data(
+                reviewer_run_id,
+                project_name,
+                *selected_task,
+                selected_path,
+                reviewer_logical_agent_name(),
+                "reviewer",
+                selected_task->attempt_count,
+                "starting",
+                reviewer_started_at,
+                std::nullopt,
+                std::nullopt,
+                std::nullopt,
+                run_id,
+                review_cycle)));
+
+        selected_task->latest_run_id = reviewer_run_id;
+        selected_task->reviewer_run_id = reviewer_run_id;
+        selected_task->updated_at = reviewer_started_at;
+        save_task_state(tasks_dir, *selected_task);
+
+        project_state = build_project_state(
+            project_name,
+            sync_result.tasks,
+            previous_project_state,
+            selected_task->id,
+            reviewer_run_id,
+            run_id,
+            ended_at,
+            run_counter,
+            default_timeout_seconds,
+            reviewer_started_at);
+        save_project_state(project_state_file, project_state);
+
+        AgentLaunchResult reviewer_launch_result{"claude", 1};
+        std::chrono::steady_clock::time_point reviewer_started_clock;
+        try {
+          write_text_file(
+              reviewer_meta_file,
+              build_meta_json(build_run_meta_data(
+                  reviewer_run_id,
+                  project_name,
+                  *selected_task,
+                  selected_path,
+                  reviewer_logical_agent_name(),
+                  "reviewer",
+                  selected_task->attempt_count,
+                  "running",
+                  reviewer_started_at,
+                  std::nullopt,
+                  std::nullopt,
+                  std::nullopt,
+                  run_id,
+                  review_cycle)));
+          event_log.append(
+              project_name,
+              EventRecord{
+                  selected_task->id,
+                  reviewer_run_id,
+                  "review.started",
+                  reviewer_logical_agent_name(),
+                  {
+                      EventPayloadField{"coder_run_id", json_string(run_id)},
+                      EventPayloadField{"review_cycle", std::to_string(review_cycle)},
+                      EventPayloadField{"agent", json_string(reviewer_logical_agent_name())},
+                  },
+              });
+          reviewer_started_clock = std::chrono::steady_clock::now();
+          reviewer_launch_result = run_agent_with_timeout(
+              "claude",
+              reviewer_prompt,
+              selected_path.path,
+              reviewer_stdout_file,
+              reviewer_stderr_file,
+              reviewer_timeout_marker_file,
+              timeout_seconds);
+        } catch (const std::exception& reviewer_launch_error) {
+          const std::string reviewer_ended_at = current_timestamp_with_offset();
+          const std::string reviewer_exit_reason = "spawn_failed";
+          const std::string reason = "reviewer failed to start: " +
+                                     std::string(reviewer_launch_error.what());
+          selected_task->status = "blocked";
+          selected_task->last_run_exit_reason = reviewer_exit_reason;
+          selected_task->last_error = reason;
+          selected_task->blocker_reason = reason;
+          selected_task->blocker_category = "reviewer_error";
+          selected_task->review_result = "reviewer_error";
+          selected_task->updated_at = reviewer_ended_at;
+          save_task_state(tasks_dir, *selected_task);
+
+          project_state = build_project_state(
+              project_name,
+              sync_result.tasks,
+              previous_project_state,
+              std::nullopt,
+              std::nullopt,
+              reviewer_run_id,
+              reviewer_ended_at,
+              run_counter,
+              default_timeout_seconds,
+              reviewer_ended_at);
+          save_project_state(project_state_file, project_state);
+
+          created_alert = AlertStore(alerts_dir).create(
+              project_name,
+              selected_task->id,
+              reviewer_run_id,
+              AlertDraft{"medium", "reviewer_error", reason},
+              reviewer_ended_at);
+
+          write_text_file(
+              reviewer_meta_file,
+              build_meta_json(build_run_meta_data(
+                  reviewer_run_id,
+                  project_name,
+                  *selected_task,
+                  selected_path,
+                  reviewer_logical_agent_name(),
+                  "reviewer",
+                  selected_task->attempt_count,
+                  "finished",
+                  reviewer_started_at,
+                  reviewer_ended_at,
+                  std::nullopt,
+                  reviewer_exit_reason,
+                  run_id,
+                  review_cycle)));
+          const std::string reviewer_result_json = build_result_json(
+              reviewer_run_id,
+              *selected_task,
+              selected_task->attempt_count,
+              "failed",
+              1,
+              reviewer_started_at,
+              reviewer_ended_at,
+              0,
+              false,
+              selected_task->status,
+              reason,
+              selected_task->blocker_reason,
+              created_alert->id);
+          write_text_file(reviewer_result_file, reviewer_result_json);
+          write_text_file(last_run_file, reviewer_result_json);
+          append_status_changed_event(
+              event_log,
+              project_name,
+              *selected_task,
+              reviewer_run_id,
+              "review_pending",
+              selected_task->status,
+              "reviewer_error");
+          event_log.append(
+              project_name,
+              EventRecord{
+                  selected_task->id,
+                  reviewer_run_id,
+                  "review.blocked",
+                  reviewer_logical_agent_name(),
+                  {
+                      EventPayloadField{"task_id", json_string(selected_task->id)},
+                      EventPayloadField{"reviewer_run_id", json_string(reviewer_run_id)},
+                      EventPayloadField{"review_cycle", std::to_string(review_cycle)},
+                      EventPayloadField{"reason", json_string(reason)},
+                      EventPayloadField{"category", json_string("reviewer_error")},
+                      EventPayloadField{"reviewer_error", "true"},
+                  },
+              });
+          event_log.append(
+              project_name,
+              EventRecord{
+                  selected_task->id,
+                  reviewer_run_id,
+                  "alert.created",
+                  "ap.start",
+                  {
+                      EventPayloadField{"alert_id", json_string(created_alert->id)},
+                      EventPayloadField{"severity", json_string(created_alert->severity)},
+                      EventPayloadField{"type", json_string(created_alert->type)},
+                      EventPayloadField{"message", json_string(created_alert->message)},
+                  },
+              });
+          blocked = true;
+          succeeded = false;
+          timed_out = false;
+          classification.blocker_reason = reason;
+          classification.blocker_category = "reviewer_error";
+          classification.summary_excerpt = reason;
+        }
+
+        if (!blocked) {
+          const auto reviewer_ended_clock = std::chrono::steady_clock::now();
+          const std::string reviewer_ended_at = current_timestamp_with_offset();
+          const long long reviewer_duration_ms =
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  reviewer_ended_clock - reviewer_started_clock)
+                  .count();
+          std::string reviewer_exit_reason;
+          std::string reviewer_process_status = reviewer_launch_result.exit_code == 0 ? "succeeded" : "failed";
+          std::optional<ReviewerVerdict> reviewer_verdict;
+
+          if (fs::exists(reviewer_timeout_marker_file)) {
+            fs::remove(reviewer_timeout_marker_file);
+            reviewer_exit_reason = "timeout";
+            reviewer_process_status = "timeout";
+          } else {
+            rewrite_stream_json_stdout_log(reviewer_stdout_file, reviewer_stderr_file);
+            if (reviewer_launch_result.exit_code == 0) {
+              try {
+                reviewer_verdict = parse_reviewer_verdict(
+                    strip_known_agent_prefix(trim_ascii_whitespace(read_text_file(reviewer_stdout_file))));
+              } catch (const std::exception&) {
+                reviewer_exit_reason = "parse_error";
+              }
+              if (!reviewer_verdict.has_value() && reviewer_exit_reason.empty()) {
+                reviewer_exit_reason = "parse_error";
+              }
+            } else {
+              reviewer_exit_reason = reviewer_failure_exit_reason(reviewer_launch_result.exit_code);
+            }
+          }
+
+          if (reviewer_verdict.has_value()) {
+            reviewer_exit_reason = "done";
+            if (reviewer_verdict->verdict == "approve") {
+              selected_task->status = "done";
+              selected_task->review_result = "approve";
+              selected_task->last_error = std::nullopt;
+              selected_task->blocker_reason = std::nullopt;
+              selected_task->blocker_category = std::nullopt;
+              selected_task->review_feedback = std::nullopt;
+              todo_update_applied = mark_todo_task_done(
+                  todo_file,
+                  TodoTaskSelection{
+                      selected_task->id,
+                      selected_task->title,
+                      selected_task->source_line,
+                      selected_task->source_text,
+                      false,
+                  });
+              if (todo_update_applied) {
+                selected_task->source_text = completed_todo_line(selected_task->source_text);
+              } else {
+                event_log.append(
+                    project_name,
+                    EventRecord{
+                        selected_task->id,
+                        reviewer_run_id,
+                        "todo.sync_conflict",
+                        "ap.start",
+                        {EventPayloadField{
+                            "message",
+                            json_string("failed to update TODO.md after review approval"),
+                        }},
+                    });
+              }
+              event_log.append(
+                  project_name,
+                  EventRecord{
+                      selected_task->id,
+                      reviewer_run_id,
+                      "review.approved",
+                      reviewer_logical_agent_name(),
+                      {
+                          EventPayloadField{"task_id", json_string(selected_task->id)},
+                          EventPayloadField{"reviewer_run_id", json_string(reviewer_run_id)},
+                          EventPayloadField{"review_cycle", std::to_string(review_cycle)},
+                          EventPayloadField{
+                              "summary",
+                              json_string(reviewer_verdict->summary.value_or("approved")),
+                          },
+                      },
+                  });
+              succeeded = true;
+              blocked = false;
+            } else if (reviewer_verdict->verdict == "rework") {
+              ++selected_task->review_cycle_count;
+              selected_task->review_result = "rework";
+              selected_task->review_feedback = TaskState::ReviewFeedback{
+                  selected_task->review_cycle_count,
+                  reviewer_run_id,
+                  reviewer_verdict->issues,
+                  reviewer_verdict->suggestions,
+                  reviewer_ended_at,
+              };
+              if (selected_task->review_cycle_count >
+                  effective_max_review_cycles(*selected_task, project_state)) {
+                const std::string reason =
+                    "max review cycles exceeded (" +
+                    std::to_string(selected_task->review_cycle_count) + "/" +
+                    std::to_string(effective_max_review_cycles(*selected_task, project_state)) + ")";
+                selected_task->status = "blocked";
+                selected_task->last_error = reason;
+                selected_task->blocker_reason = reason;
+                selected_task->blocker_category = "review_cycle_limit";
+                created_alert = AlertStore(alerts_dir).create(
+                    project_name,
+                    selected_task->id,
+                    reviewer_run_id,
+                    AlertDraft{"medium", "review_cycle_exceeded", reason},
+                    reviewer_ended_at);
+                event_log.append(
+                    project_name,
+                    EventRecord{
+                        selected_task->id,
+                        reviewer_run_id,
+                        "task.review_cycle_exceeded",
+                        reviewer_logical_agent_name(),
+                        {
+                            EventPayloadField{"task_id", json_string(selected_task->id)},
+                            EventPayloadField{"reviewer_run_id", json_string(reviewer_run_id)},
+                            EventPayloadField{
+                                "review_cycle_count",
+                                std::to_string(selected_task->review_cycle_count),
+                            },
+                            EventPayloadField{
+                                "max_review_cycles",
+                                std::to_string(
+                                    effective_max_review_cycles(*selected_task, project_state)),
+                            },
+                        },
+                    });
+                classification.blocker_reason = reason;
+                classification.blocker_category = "review_cycle_limit";
+                blocked = true;
+                succeeded = false;
+              } else {
+                selected_task->status = "todo";
+                selected_task->last_run_exit_reason = std::nullopt;
+                selected_task->last_error = std::nullopt;
+                selected_task->blocker_reason = std::nullopt;
+                selected_task->blocker_category = std::nullopt;
+                event_log.append(
+                    project_name,
+                    EventRecord{
+                        selected_task->id,
+                        reviewer_run_id,
+                        "review.rework_requested",
+                        reviewer_logical_agent_name(),
+                        {
+                            EventPayloadField{"task_id", json_string(selected_task->id)},
+                            EventPayloadField{"reviewer_run_id", json_string(reviewer_run_id)},
+                            EventPayloadField{"review_cycle", std::to_string(review_cycle)},
+                            EventPayloadField{
+                                "issues",
+                                json_string_array(reviewer_verdict->issues),
+                            },
+                            EventPayloadField{
+                                "suggestions",
+                                json_string_array(reviewer_verdict->suggestions),
+                            },
+                        },
+                    });
+                succeeded = false;
+                blocked = false;
+              }
+            } else {
+              selected_task->status = "blocked";
+              selected_task->review_result = "blocked";
+              selected_task->last_error = reviewer_verdict->reason;
+              selected_task->blocker_reason = reviewer_verdict->reason;
+              selected_task->blocker_category =
+                  reviewer_verdict->category.value_or("other");
+              const std::string alert_message =
+                  "reviewer blocked " + selected_task->id + ": " +
+                  reviewer_verdict->reason.value_or("blocked");
+              created_alert = AlertStore(alerts_dir).create(
+                  project_name,
+                  selected_task->id,
+                  reviewer_run_id,
+                  AlertDraft{"high", "reviewer_blocked", alert_message},
+                  reviewer_ended_at);
+              event_log.append(
+                  project_name,
+                  EventRecord{
+                      selected_task->id,
+                      reviewer_run_id,
+                      "review.blocked",
+                      reviewer_logical_agent_name(),
+                      {
+                          EventPayloadField{"task_id", json_string(selected_task->id)},
+                          EventPayloadField{"reviewer_run_id", json_string(reviewer_run_id)},
+                          EventPayloadField{"review_cycle", std::to_string(review_cycle)},
+                          EventPayloadField{
+                              "reason",
+                              json_string(reviewer_verdict->reason.value_or("blocked")),
+                          },
+                          EventPayloadField{
+                              "category",
+                              json_string(reviewer_verdict->category.value_or("other")),
+                          },
+                          EventPayloadField{"parse_error", "false"},
+                      },
+                  });
+              classification.blocker_reason = reviewer_verdict->reason;
+              classification.blocker_category = reviewer_verdict->category;
+              blocked = true;
+              succeeded = false;
+            }
+          } else if (reviewer_exit_reason == "parse_error") {
+            const std::string reason = "reviewer output could not be parsed";
+            selected_task->status = "blocked";
+            selected_task->review_result = "parse_error";
+            selected_task->last_error = reason;
+            selected_task->blocker_reason = reason;
+            selected_task->blocker_category = "reviewer_error";
+            created_alert = AlertStore(alerts_dir).create(
+                project_name,
+                selected_task->id,
+                reviewer_run_id,
+                AlertDraft{"medium", "reviewer_parse_error", reason},
+                reviewer_ended_at);
+            event_log.append(
+                project_name,
+                EventRecord{
+                    selected_task->id,
+                    reviewer_run_id,
+                    "review.blocked",
+                    reviewer_logical_agent_name(),
+                    {
+                        EventPayloadField{"task_id", json_string(selected_task->id)},
+                        EventPayloadField{"reviewer_run_id", json_string(reviewer_run_id)},
+                        EventPayloadField{"review_cycle", std::to_string(review_cycle)},
+                        EventPayloadField{"reason", json_string(reason)},
+                        EventPayloadField{"category", json_string("reviewer_error")},
+                        EventPayloadField{"parse_error", "true"},
+                    },
+                });
+            classification.blocker_reason = reason;
+            classification.blocker_category = "reviewer_error";
+            blocked = true;
+            succeeded = false;
+          } else {
+            const std::string reason =
+                reviewer_exit_reason == "timeout"
+                    ? "timed out after " + std::to_string(timeout_seconds) + " seconds"
+                    : "reviewer exited with status " +
+                          std::to_string(reviewer_launch_result.exit_code);
+            selected_task->status = "blocked";
+            selected_task->review_result = "reviewer_error";
+            selected_task->last_error = reason;
+            selected_task->blocker_reason = reason;
+            selected_task->blocker_category = "reviewer_error";
+            created_alert = AlertStore(alerts_dir).create(
+                project_name,
+                selected_task->id,
+                reviewer_run_id,
+                AlertDraft{"medium", "reviewer_error", reason},
+                reviewer_ended_at);
+            event_log.append(
+                project_name,
+                EventRecord{
+                    selected_task->id,
+                    reviewer_run_id,
+                    "review.blocked",
+                    reviewer_logical_agent_name(),
+                    {
+                        EventPayloadField{"task_id", json_string(selected_task->id)},
+                        EventPayloadField{"reviewer_run_id", json_string(reviewer_run_id)},
+                        EventPayloadField{"review_cycle", std::to_string(review_cycle)},
+                        EventPayloadField{"reason", json_string(reason)},
+                        EventPayloadField{"category", json_string("reviewer_error")},
+                        EventPayloadField{"reviewer_error", "true"},
+                    },
+                });
+            classification.blocker_reason = reason;
+            classification.blocker_category = "reviewer_error";
+            blocked = true;
+            succeeded = false;
+          }
+
+          selected_task->last_run_exit_reason = reviewer_exit_reason;
+          selected_task->updated_at = reviewer_ended_at;
+          save_task_state(tasks_dir, *selected_task);
+
+          project_state = build_project_state(
+              project_name,
+              sync_result.tasks,
+              previous_project_state,
+              std::nullopt,
+              std::nullopt,
+              reviewer_run_id,
+              reviewer_ended_at,
+              run_counter,
+              default_timeout_seconds,
+              reviewer_ended_at);
+          save_project_state(project_state_file, project_state);
+
+          write_text_file(
+              reviewer_meta_file,
+              build_meta_json(build_run_meta_data(
+                  reviewer_run_id,
+                  project_name,
+                  *selected_task,
+                  selected_path,
+                  reviewer_logical_agent_name(),
+                  "reviewer",
+                  selected_task->attempt_count,
+                  "finished",
+                  reviewer_started_at,
+                  reviewer_ended_at,
+                  reviewer_launch_result.exit_code,
+                  reviewer_exit_reason,
+                  run_id,
+                  review_cycle,
+                  reviewer_verdict.has_value()
+                      ? std::optional<std::string>(reviewer_verdict->verdict)
+                      : std::nullopt)));
+
+          event_log.append_stream_file(
+              project_name,
+              selected_task->id,
+              reviewer_run_id,
+              "agent." + reviewer_logical_agent_name(),
+              "stdout",
+              reviewer_stdout_file);
+          event_log.append_stream_file(
+              project_name,
+              selected_task->id,
+              reviewer_run_id,
+              "agent." + reviewer_logical_agent_name(),
+              "stderr",
+              reviewer_stderr_file);
+          event_log.append(
+              project_name,
+              EventRecord{
+                  selected_task->id,
+                  reviewer_run_id,
+                  "run.finished",
+                  "ap.start",
+                  {
+                      EventPayloadField{
+                          "agent",
+                          json_string(reviewer_logical_agent_name()),
+                      },
+                      EventPayloadField{"role", json_string("reviewer")},
+                      EventPayloadField{
+                          "exit_code",
+                          std::to_string(reviewer_launch_result.exit_code),
+                      },
+                      EventPayloadField{
+                          "duration_ms",
+                          std::to_string(reviewer_duration_ms),
+                      },
+                  },
+              });
+          if (created_alert.has_value()) {
+            event_log.append(
+                project_name,
+                EventRecord{
+                    selected_task->id,
+                    reviewer_run_id,
+                    "alert.created",
+                    "ap.start",
+                    {
+                        EventPayloadField{"alert_id", json_string(created_alert->id)},
+                        EventPayloadField{"severity", json_string(created_alert->severity)},
+                        EventPayloadField{"type", json_string(created_alert->type)},
+                        EventPayloadField{"message", json_string(created_alert->message)},
+                    },
+                });
+          }
+
+          const std::string reviewer_summary =
+              reviewer_verdict.has_value()
+                  ? reviewer_verdict->summary.value_or(reviewer_verdict->verdict)
+                  : classification.blocker_reason.value_or(reviewer_exit_reason);
+          const std::string reviewer_result_json = build_result_json(
+              reviewer_run_id,
+              *selected_task,
+              selected_task->attempt_count,
+              reviewer_process_status,
+              reviewer_launch_result.exit_code,
+              reviewer_started_at,
+              reviewer_ended_at,
+              reviewer_duration_ms,
+              todo_update_applied,
+              selected_task->status,
+              reviewer_summary,
+              selected_task->blocker_reason,
+              created_alert.has_value()
+                  ? std::optional<std::string>(created_alert->id)
+                  : std::nullopt);
+          write_text_file(reviewer_result_file, reviewer_result_json);
+          write_text_file(last_run_file, reviewer_result_json);
+          append_status_changed_event(
+              event_log,
+              project_name,
+              *selected_task,
+              reviewer_run_id,
+              "review_pending",
+              selected_task->status,
+              "review_finalized");
+          event_log.append(
+              project_name,
+              EventRecord{
+                  selected_task->id,
+                  reviewer_run_id,
+                  "result.final",
+                  "runtime.classifier",
+                  {
+                      EventPayloadField{
+                          "final_task_status",
+                          json_string(selected_task->status),
+                      },
+                      EventPayloadField{
+                          "process_exit_code",
+                          std::to_string(reviewer_launch_result.exit_code),
+                      },
+                      EventPayloadField{
+                          "process_status",
+                          json_string(reviewer_process_status),
+                      },
+                      EventPayloadField{
+                          "summary",
+                          json_string(reviewer_summary),
+                      },
+                      EventPayloadField{
+                          "todo_update_applied",
+                          todo_update_applied ? "true" : "false",
+                      },
+                      EventPayloadField{
+                          "alert_id",
+                          json_nullable_string(
+                              created_alert.has_value()
+                                  ? std::optional<std::string>(created_alert->id)
+                                  : std::nullopt),
+                      },
+                  },
+              });
+        }
+      }
     } catch (const std::exception& e) {
       finalize_postrun_failure(
           tasks_dir,
@@ -1676,6 +2739,13 @@ int cmd_start(
 
     if (timed_out) {
       std::cerr << "ap start failed: task timed out after " << timeout_seconds << " seconds\n";
+      return 1;
+    }
+
+    if (selected_task->status == "todo" && selected_task->review_result == "rework") {
+      std::cerr << "ap start: reviewer returned rework for task " << selected_task->id
+                << " (cycle " << selected_task->review_cycle_count << "/"
+                << effective_max_review_cycles(*selected_task, project_state) << ")\n";
       return 1;
     }
 

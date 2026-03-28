@@ -3,6 +3,7 @@
 #include "autopilot/runtime/json_utils.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -30,6 +31,109 @@ void write_text_file(const fs::path& path, const std::string& content) {
     throw std::runtime_error("failed to write file: " + path.string());
   }
   out << content;
+}
+
+std::optional<std::string> extract_optional_object_field(
+    const std::string& json, const std::string& key) {
+  const std::string field = "\"" + key + "\"";
+  const std::size_t key_pos = json.find(field);
+  if (key_pos == std::string::npos) {
+    return std::nullopt;
+  }
+
+  std::size_t pos = json.find(':', key_pos + field.size());
+  if (pos == std::string::npos) {
+    throw std::runtime_error("invalid object field: " + key);
+  }
+  ++pos;
+  while (pos < json.size() &&
+         std::isspace(static_cast<unsigned char>(json[pos])) != 0) {
+    ++pos;
+  }
+  if (pos >= json.size()) {
+    throw std::runtime_error("invalid object field: " + key);
+  }
+  if (json.compare(pos, 4, "null") == 0) {
+    return std::nullopt;
+  }
+  if (json[pos] != '{') {
+    throw std::runtime_error("invalid object field: " + key);
+  }
+
+  const std::size_t start = pos;
+  int depth = 0;
+  bool in_string = false;
+  bool escaped = false;
+  for (; pos < json.size(); ++pos) {
+    const char ch = json[pos];
+    if (in_string) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch == '\\') {
+        escaped = true;
+      } else if (ch == '"') {
+        in_string = false;
+      }
+      continue;
+    }
+
+    if (ch == '"') {
+      in_string = true;
+      continue;
+    }
+    if (ch == '{') {
+      ++depth;
+      continue;
+    }
+    if (ch == '}') {
+      --depth;
+      if (depth == 0) {
+        return json.substr(start, pos - start + 1);
+      }
+    }
+  }
+
+  throw std::runtime_error("invalid object field: " + key);
+}
+
+bool nullable_integer_field_is_null(const std::string& json, const std::string& key) {
+  const std::string pattern = "\"" + key + "\":";
+  std::size_t pos = json.find(pattern);
+  if (pos == std::string::npos) {
+    return false;
+  }
+  pos = json.find_first_not_of(" \t\r\n", pos + pattern.size());
+  return pos != std::string::npos && json.compare(pos, 4, "null") == 0;
+}
+
+std::string build_review_feedback_json(const TaskState::ReviewFeedback& feedback) {
+  std::ostringstream oss;
+  oss << "{";
+  oss << "\"review_cycle\": " << feedback.review_cycle << ", ";
+  oss << "\"reviewer_run_id\": " << json_string(feedback.reviewer_run_id) << ", ";
+  oss << "\"issues\": " << json_string_array(feedback.issues) << ", ";
+  oss << "\"suggestions\": " << json_string_array(feedback.suggestions) << ", ";
+  oss << "\"recorded_at\": " << json_string(feedback.recorded_at);
+  oss << "}";
+  return oss.str();
+}
+
+std::optional<TaskState::ReviewFeedback> parse_review_feedback(const std::string& json) {
+  const std::optional<std::string> object = extract_optional_object_field(json, "review_feedback");
+  if (!object.has_value()) {
+    return std::nullopt;
+  }
+
+  TaskState::ReviewFeedback feedback;
+  feedback.review_cycle =
+      static_cast<int>(json_read_required_integer(*object, "review_cycle"));
+  feedback.reviewer_run_id = json_read_required_string(*object, "reviewer_run_id");
+  feedback.issues = json_read_optional_string_array(*object, "issues").value_or(
+      std::vector<std::string>{});
+  feedback.suggestions = json_read_optional_string_array(*object, "suggestions").value_or(
+      std::vector<std::string>{});
+  feedback.recorded_at = json_read_required_string(*object, "recorded_at");
+  return feedback;
 }
 
 TaskState parse_task_state_file(const fs::path& path) {
@@ -60,6 +164,20 @@ TaskState parse_task_state_file(const fs::path& path) {
     task.last_error = json_read_optional_string(json, "last_error");
     task.blocker_reason = json_read_optional_string(json, "blocker_reason");
     task.blocker_category = json_read_optional_string(json, "blocker_category");
+    task.review_required = json_read_optional_bool(json, "review_required").value_or(false);
+    task.skip_review = json_read_optional_bool(json, "skip_review").value_or(false);
+    task.review_result = json_read_optional_string(json, "review_result");
+    task.reviewer_run_id = json_read_optional_string(json, "reviewer_run_id");
+    task.review_cycle_count =
+        static_cast<int>(json_read_optional_integer(json, "review_cycle_count").value_or(0));
+    if (!nullable_integer_field_is_null(json, "max_review_cycles")) {
+      if (const std::optional<long long> max_review_cycles =
+              json_read_optional_integer(json, "max_review_cycles");
+          max_review_cycles.has_value()) {
+        task.max_review_cycles = static_cast<int>(*max_review_cycles);
+      }
+    }
+    task.review_feedback = parse_review_feedback(json);
     task.created_at = json_read_required_string(json, "created_at");
     task.updated_at = json_read_required_string(json, "updated_at");
     return task;
@@ -92,6 +210,25 @@ std::string build_task_state_json(const TaskState& task) {
   oss << "  \"last_error\": " << json_nullable_string(task.last_error) << ",\n";
   oss << "  \"blocker_reason\": " << json_nullable_string(task.blocker_reason) << ",\n";
   oss << "  \"blocker_category\": " << json_nullable_string(task.blocker_category) << ",\n";
+  oss << "  \"review_required\": " << (task.review_required ? "true" : "false") << ",\n";
+  oss << "  \"skip_review\": " << (task.skip_review ? "true" : "false") << ",\n";
+  oss << "  \"review_result\": " << json_nullable_string(task.review_result) << ",\n";
+  oss << "  \"reviewer_run_id\": " << json_nullable_string(task.reviewer_run_id) << ",\n";
+  oss << "  \"review_cycle_count\": " << task.review_cycle_count << ",\n";
+  oss << "  \"max_review_cycles\": ";
+  if (task.max_review_cycles.has_value()) {
+    oss << *task.max_review_cycles;
+  } else {
+    oss << "null";
+  }
+  oss << ",\n";
+  oss << "  \"review_feedback\": ";
+  if (task.review_feedback.has_value()) {
+    oss << build_review_feedback_json(*task.review_feedback);
+  } else {
+    oss << "null";
+  }
+  oss << ",\n";
   oss << "  \"created_at\": " << json_string(task.created_at) << ",\n";
   oss << "  \"updated_at\": " << json_string(task.updated_at) << "\n";
   oss << "}\n";
@@ -109,6 +246,8 @@ std::string build_project_state_json(const ProjectState& project) {
   oss << "  \"last_run_at\": " << json_nullable_string(project.last_run_at) << ",\n";
   oss << "  \"run_counter\": " << project.run_counter << ",\n";
   oss << "  \"default_timeout_seconds\": " << project.default_timeout_seconds << ",\n";
+  oss << "  \"review_enabled\": " << (project.review_enabled ? "true" : "false") << ",\n";
+  oss << "  \"max_review_cycles\": " << project.max_review_cycles << ",\n";
   oss << "  \"task_counts\": {\n";
   oss << "    \"todo\": " << project.task_counts.todo << ",\n";
   oss << "    \"in_progress\": " << project.task_counts.in_progress << ",\n";
@@ -160,6 +299,9 @@ std::optional<ProjectState> load_project_state(const fs::path& project_file) {
   project.run_counter = static_cast<int>(json_read_optional_integer(json, "run_counter").value_or(0));
   project.default_timeout_seconds =
       static_cast<int>(json_read_optional_integer(json, "default_timeout_seconds").value_or(1800));
+  project.review_enabled = json_read_optional_bool(json, "review_enabled").value_or(false);
+  project.max_review_cycles =
+      static_cast<int>(json_read_optional_integer(json, "max_review_cycles").value_or(2));
   project.task_counts.todo = static_cast<int>(json_read_required_integer(json, "todo"));
   project.task_counts.in_progress =
       static_cast<int>(json_read_required_integer(json, "in_progress"));

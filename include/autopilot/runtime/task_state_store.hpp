@@ -6,6 +6,14 @@
 #include <vector>
 
 struct TaskState {
+  struct ReviewFeedback {
+    int review_cycle = 0;
+    std::string reviewer_run_id;
+    std::vector<std::string> issues;
+    std::vector<std::string> suggestions;
+    std::string recorded_at;
+  };
+
   std::string id;
   std::string title;
   std::optional<std::string> description;
@@ -27,6 +35,13 @@ struct TaskState {
   std::optional<std::string> last_error;
   std::optional<std::string> blocker_reason;
   std::optional<std::string> blocker_category;
+  bool review_required = false;
+  bool skip_review = false;
+  std::optional<std::string> review_result;
+  std::optional<std::string> reviewer_run_id;
+  int review_cycle_count = 0;
+  std::optional<int> max_review_cycles;
+  std::optional<ReviewFeedback> review_feedback;
   std::string created_at;
   std::string updated_at;
 };
@@ -50,6 +65,8 @@ struct ProjectState {
   std::optional<std::string> last_run_at;
   int run_counter = 0;
   int default_timeout_seconds = 1800;
+  bool review_enabled = false;
+  int max_review_cycles = 2;
   ProjectTaskCounts task_counts;
   std::string updated_at;
 };

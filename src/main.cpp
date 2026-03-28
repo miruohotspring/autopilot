@@ -22,7 +22,7 @@ void print_usage(const char* prog) {
   std::cerr << "       " << prog << " add <path> [-n <name>] [-p <project_name>]\n";
   std::cerr << "       " << prog << " task add <title> [-p <project_name>]\n";
   std::cerr << "       " << prog << " rm [-p <project_name>]\n";
-  std::cerr << "       " << prog << " start [project_name] [--timeout <seconds>]\n";
+  std::cerr << "       " << prog << " start [project_name] [--review] [--no-review] [--timeout <seconds>]\n";
   std::cerr << "       " << prog << " briefing\n";
   std::cerr << "       " << prog << " kill\n";
   std::cerr << "       " << prog << " update\n";
@@ -145,6 +145,8 @@ int main(int argc, char** argv) {
   if (cmd == "start") {
     std::optional<std::string> maybe_project;
     std::optional<int> maybe_timeout;
+    bool requested_review = false;
+    bool requested_no_review = false;
     int i = 2;
     while (i < argc) {
       const std::string arg = argv[i];
@@ -156,6 +158,12 @@ int main(int argc, char** argv) {
           return 1;
         }
         i += 2;
+      } else if (arg == "--review") {
+        requested_review = true;
+        ++i;
+      } else if (arg == "--no-review") {
+        requested_no_review = true;
+        ++i;
       } else if (arg.rfind("--", 0) != 0 && !maybe_project.has_value()) {
         maybe_project = arg;
         ++i;
@@ -164,7 +172,13 @@ int main(int argc, char** argv) {
         return 1;
       }
     }
-    return cmd_start(maybe_project, maybe_timeout);
+    std::optional<bool> maybe_review_enabled;
+    if (requested_review) {
+      maybe_review_enabled = true;
+    } else if (requested_no_review) {
+      maybe_review_enabled = false;
+    }
+    return cmd_start(maybe_project, maybe_timeout, maybe_review_enabled);
   }
 
   if (cmd == "briefing") {

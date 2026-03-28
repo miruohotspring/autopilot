@@ -51,6 +51,20 @@ write_fake_agent() {
 cat >"$dir/$name" <<'EOF'
 #!/bin/bash
 set -euo pipefail
+role="coder"
+agent_name="${FAKE_AGENT_NAME:-agent}"
+stdout_message="${FAKE_AGENT_STDOUT:-fake agent completed}"
+stderr_message="${FAKE_AGENT_STDERR:-}"
+exit_code="${FAKE_AGENT_EXIT_CODE:-0}"
+sleep_seconds="${FAKE_AGENT_SLEEP_SECONDS:-}"
+if [[ "$*" == *'"verdict"'* ]]; then
+  role="reviewer"
+  agent_name="${FAKE_AGENT_REVIEWER_NAME:-$agent_name}"
+  stdout_message="${FAKE_AGENT_REVIEWER_STDOUT:-$stdout_message}"
+  stderr_message="${FAKE_AGENT_REVIEWER_STDERR:-$stderr_message}"
+  exit_code="${FAKE_AGENT_REVIEWER_EXIT_CODE:-$exit_code}"
+  sleep_seconds="${FAKE_AGENT_REVIEWER_SLEEP_SECONDS:-$sleep_seconds}"
+fi
 if [[ "${FAKE_AGENT_IGNORE_TERM:-}" == "1" ]]; then
   trap '' TERM HUP
 fi
@@ -58,16 +72,16 @@ if [[ -n "${FAKE_AGENT_PID_FILE:-}" ]]; then
   printf '%s\n' "$$" > "${FAKE_AGENT_PID_FILE}"
 fi
 printf '%s\n' "argv:$*"
-printf '%s\n' "${FAKE_AGENT_NAME:-agent}:${FAKE_AGENT_STDOUT:-fake agent completed}"
-printf '%s\n' "${FAKE_AGENT_NAME:-agent}:${FAKE_AGENT_STDERR:-}" >&2
-if [[ -n "${FAKE_AGENT_SLEEP_SECONDS:-}" ]]; then
-  sleep "${FAKE_AGENT_SLEEP_SECONDS}"
+printf '%s\n' "${agent_name}:${stdout_message}"
+printf '%s\n' "${agent_name}:${stderr_message}" >&2
+if [[ -n "${sleep_seconds}" ]]; then
+  sleep "${sleep_seconds}"
 fi
 if [[ -n "${FAKE_AGENT_MUTATE_TODO_FILE:-}" ]]; then
   perl -0pi -e 's/\Q$ENV{FAKE_AGENT_MUTATE_TODO_FROM}\E/$ENV{FAKE_AGENT_MUTATE_TODO_TO}/g' \
     "$FAKE_AGENT_MUTATE_TODO_FILE"
 fi
-exit "${FAKE_AGENT_EXIT_CODE:-0}"
+exit "${exit_code}"
 EOF
   chmod +x "$dir/$name"
 }
@@ -453,8 +467,94 @@ env -u TMUX HOME="$home2" PATH="$fake_bin:$PATH" FAKE_AGENT_STDOUT="configured a
   "$AP_BIN" start ConfigProject >"$stdout12"
 config_run_dir="$(latest_run_dir "$home2/.autopilot/projects/ConfigProject")"
 assert_file_contains "$stdout12" "completed task: config task"
-assert_file_contains "$config_run_dir/meta.json" "\"agent\": \"codex\""
+assert_file_contains "$config_run_dir/meta.json" "\"agent\": \"coder.codex\""
 assert_file_contains "$config_run_dir/stdout.log" "argv:exec --skip-git-repo-check --sandbox workspace-write --full-auto"
+rm -f "$home2/.autopilot/config.toml"
+
+echo "[test] review approve keeps TODO pending until reviewer and records reviewer run"
+review_approve_repo="$TMP_DIR/repo-review-approve"
+mkdir -p "$review_approve_repo"
+new_project "ReviewApproveProject" "reviewok" "$review_approve_repo"
+add_task "ReviewApproveProject" "reviewed task"
+stdout_review_ok="$TMP_DIR/start_stdout_review_ok.txt"
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" FAKE_AGENT_STDOUT="coder implementation done" \
+  FAKE_AGENT_REVIEWER_NAME="claude" \
+  FAKE_AGENT_REVIEWER_STDOUT='{"verdict":"approve","summary":"looks good"}' \
+  "$AP_BIN" start ReviewApproveProject --review >"$stdout_review_ok"
+review_ok_runs_dir="$home2/.autopilot/projects/ReviewApproveProject/runtime/runs"
+review_ok_runs=( "$review_ok_runs_dir"/* )
+review_ok_coder_run_id="$(basename "${review_ok_runs[0]}")"
+review_ok_reviewer_run_id="$(basename "${review_ok_runs[1]}")"
+review_ok_task="$home2/.autopilot/projects/ReviewApproveProject/runtime/state/tasks/reviewok-0001.json"
+assert_file_contains "$stdout_review_ok" "completed task: reviewed task"
+assert_file_contains "$home2/.autopilot/projects/ReviewApproveProject/TODO.md" "- [x] [reviewok-0001] reviewed task"
+assert_file_contains "$review_ok_task" "\"status\": \"done\""
+assert_file_contains "$review_ok_task" "\"review_result\": \"approve\""
+assert_file_contains "$review_ok_task" "\"latest_run_id\": \"$review_ok_reviewer_run_id\""
+assert_file_contains "$review_ok_task" "\"reviewer_run_id\": \"$review_ok_reviewer_run_id\""
+assert_file_contains "${review_ok_runs[0]}/meta.json" "\"role\": \"coder\""
+assert_file_contains "${review_ok_runs[0]}/meta.json" "\"agent\": \"coder.claude\""
+assert_file_contains "${review_ok_runs[1]}/meta.json" "\"role\": \"reviewer\""
+assert_file_contains "${review_ok_runs[1]}/meta.json" "\"agent\": \"reviewer.claude\""
+assert_file_contains "${review_ok_runs[1]}/meta.json" "\"coder_run_id\": \"$review_ok_coder_run_id\""
+assert_file_contains "$home2/.autopilot/projects/ReviewApproveProject/runtime/events/events.jsonl" "\"type\": \"review.approved\""
+
+echo "[test] review rework returns task to todo and stores feedback"
+review_rework_repo="$TMP_DIR/repo-review-rework"
+mkdir -p "$review_rework_repo"
+new_project "ReviewReworkProject" "reviewrw" "$review_rework_repo"
+add_task "ReviewReworkProject" "needs another pass"
+stderr_review_rw="$TMP_DIR/start_stderr_review_rw.txt"
+set +e
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" FAKE_AGENT_STDOUT="coder implementation done" \
+  FAKE_AGENT_REVIEWER_NAME="claude" \
+  FAKE_AGENT_REVIEWER_STDOUT='{"verdict":"rework","issues":["missing test"],"suggestions":["add test"]}' \
+  "$AP_BIN" start ReviewReworkProject --review >/dev/null 2>"$stderr_review_rw"
+status_review_rw=$?
+set -e
+if [[ "$status_review_rw" -eq 0 ]]; then
+  echo "assert failed: expected review rework to return non-zero" >&2
+  exit 1
+fi
+review_rw_task="$home2/.autopilot/projects/ReviewReworkProject/runtime/state/tasks/reviewrw-0001.json"
+assert_file_contains "$stderr_review_rw" "reviewer returned rework for task reviewrw-0001"
+assert_file_contains "$home2/.autopilot/projects/ReviewReworkProject/TODO.md" "- [ ] [reviewrw-0001] needs another pass"
+assert_file_contains "$review_rw_task" "\"status\": \"todo\""
+assert_file_contains "$review_rw_task" "\"review_result\": \"rework\""
+assert_file_contains "$review_rw_task" "\"review_cycle_count\": 1"
+assert_file_contains "$review_rw_task" "\"issues\": [\"missing test\"]"
+assert_file_contains "$review_rw_task" "\"suggestions\": [\"add test\"]"
+assert_file_contains "$home2/.autopilot/projects/ReviewReworkProject/runtime/events/events.jsonl" "\"type\": \"review.rework_requested\""
+
+echo "[test] review blocked creates alert and blocks the task"
+review_blocked_repo="$TMP_DIR/repo-review-blocked"
+mkdir -p "$review_blocked_repo"
+new_project "ReviewBlockedProject" "reviewblk" "$review_blocked_repo"
+add_task "ReviewBlockedProject" "needs human input"
+stderr_review_blocked="$TMP_DIR/start_stderr_review_blocked.txt"
+set +e
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" FAKE_AGENT_STDOUT="coder implementation done" \
+  FAKE_AGENT_REVIEWER_NAME="claude" \
+  FAKE_AGENT_REVIEWER_STDOUT='{"verdict":"blocked","reason":"needs product decision","category":"human_required"}' \
+  "$AP_BIN" start ReviewBlockedProject --review >/dev/null 2>"$stderr_review_blocked"
+status_review_blocked=$?
+set -e
+if [[ "$status_review_blocked" -eq 0 ]]; then
+  echo "assert failed: expected review blocked to return non-zero" >&2
+  exit 1
+fi
+review_blocked_task="$home2/.autopilot/projects/ReviewBlockedProject/runtime/state/tasks/reviewblk-0001.json"
+assert_file_contains "$stderr_review_blocked" "ap start blocked: needs product decision"
+assert_file_contains "$review_blocked_task" "\"status\": \"blocked\""
+assert_file_contains "$review_blocked_task" "\"review_result\": \"blocked\""
+assert_file_contains "$review_blocked_task" "\"blocker_category\": \"human_required\""
+assert_file_contains "$home2/.autopilot/projects/ReviewBlockedProject/runtime/events/events.jsonl" "\"type\": \"review.blocked\""
+review_blocked_alert="$(find "$home2/.autopilot/projects/ReviewBlockedProject/runtime/alerts" -type f | head -n 1)"
+assert_exists "$review_blocked_alert"
+assert_file_contains "$review_blocked_alert" "\"type\": \"reviewer_blocked\""
 
 # --- Phase 5 tests ---
 

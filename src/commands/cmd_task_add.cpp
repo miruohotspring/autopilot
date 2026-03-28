@@ -215,9 +215,17 @@ int cmd_task_add(
     task.present_in_todo = true;
     task.attempt_count = 0;
     task.latest_run_id = std::nullopt;
+    task.last_run_exit_reason = std::nullopt;
     task.last_error = std::nullopt;
     task.blocker_reason = std::nullopt;
     task.blocker_category = std::nullopt;
+    task.review_required = false;
+    task.skip_review = false;
+    task.review_result = std::nullopt;
+    task.reviewer_run_id = std::nullopt;
+    task.review_cycle_count = 0;
+    task.max_review_cycles = std::nullopt;
+    task.review_feedback = std::nullopt;
     task.created_at = current_timestamp_with_offset();
     task.updated_at = task.created_at;
 
