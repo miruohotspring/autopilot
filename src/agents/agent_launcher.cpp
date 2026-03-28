@@ -92,7 +92,7 @@ std::optional<std::string> parse_quoted_toml_string(const std::string& raw_value
   return std::nullopt;
 }
 
-std::optional<std::string> load_configured_agent() {
+std::optional<std::string> load_configured_start_string(const std::string& key) {
   const fs::path config_file = autopilot_dir_path() / "config.toml";
   if (!fs::exists(config_file)) {
     return std::nullopt;
@@ -128,18 +128,22 @@ std::optional<std::string> load_configured_agent() {
     if (!std::regex_match(trimmed, kv_match, key_value_re)) {
       continue;
     }
-    if (kv_match[1].str() != "agent") {
+    if (kv_match[1].str() != key) {
       continue;
     }
 
     const std::optional<std::string> parsed = parse_quoted_toml_string(kv_match[2].str());
     if (!parsed.has_value()) {
-      throw std::runtime_error("invalid start.agent in config.toml");
+      throw std::runtime_error("invalid start." + key + " in config.toml");
     }
     return *parsed;
   }
 
   return std::nullopt;
+}
+
+std::optional<std::string> load_configured_agent() {
+  return load_configured_start_string("agent");
 }
 
 int decode_system_exit_code(const int system_status) {
@@ -175,6 +179,24 @@ std::string resolve_agent_name() {
     }
   }
   throw std::runtime_error("no supported agent CLI found");
+}
+
+std::string resolve_reviewer_agent_name(
+    const std::optional<std::string>& cli_override,
+    const std::string& coder_agent_name) {
+  std::string resolved;
+  if (cli_override.has_value()) {
+    resolved = *cli_override;
+  } else {
+    resolved = load_configured_start_string("reviewer_agent").value_or(coder_agent_name);
+  }
+  if (resolved != "claude" && resolved != "codex") {
+    throw std::runtime_error("unsupported reviewer agent: " + resolved);
+  }
+  if (!find_executable_in_path(resolved).has_value()) {
+    throw std::runtime_error("reviewer agent CLI not found: " + resolved);
+  }
+  return resolved;
 }
 
 AgentLaunchResult run_agent(

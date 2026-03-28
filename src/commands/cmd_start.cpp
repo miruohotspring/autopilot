@@ -1004,8 +1004,8 @@ std::string coder_logical_agent_name(const std::string& agent_name) {
   return "coder." + agent_name;
 }
 
-std::string reviewer_logical_agent_name() {
-  return "reviewer.claude";
+std::string reviewer_logical_agent_name(const std::string& agent_name) {
+  return "reviewer." + agent_name;
 }
 
 bool review_flow_enabled_for_task(
@@ -1215,7 +1215,8 @@ std::string completed_todo_line(const std::string& line) {
 int cmd_start(
     const std::optional<std::string>& maybe_project_name,
     std::optional<int> maybe_timeout_seconds,
-    std::optional<bool> maybe_review_enabled) {
+    std::optional<bool> maybe_review_enabled,
+    std::optional<std::string> maybe_reviewer_agent) {
   try {
     const std::string project_name = resolve_project_name(maybe_project_name);
     const fs::path project_dir = project_dir_path(project_name);
@@ -1479,7 +1480,9 @@ int cmd_start(
     }
 
     const std::string agent_name = resolve_agent_name();
+    const std::string reviewer_agent_name = resolve_reviewer_agent_name(maybe_reviewer_agent, agent_name);
     const std::string coder_agent = coder_logical_agent_name(agent_name);
+    const std::string reviewer_agent = reviewer_logical_agent_name(reviewer_agent_name);
 
     // Generate run_id using the incremented run_counter
     ++run_counter;
@@ -2040,7 +2043,7 @@ int cmd_start(
                 project_name,
                 *selected_task,
                 selected_path,
-                reviewer_logical_agent_name(),
+                reviewer_agent,
                 "reviewer",
                 selected_task->attempt_count,
                 "starting",
@@ -2069,7 +2072,7 @@ int cmd_start(
             reviewer_started_at);
         save_project_state(project_state_file, project_state);
 
-        AgentLaunchResult reviewer_launch_result{"claude", 1};
+        AgentLaunchResult reviewer_launch_result{reviewer_agent_name, 1};
         std::chrono::steady_clock::time_point reviewer_started_clock;
         try {
           write_text_file(
@@ -2079,7 +2082,7 @@ int cmd_start(
                   project_name,
                   *selected_task,
                   selected_path,
-                  reviewer_logical_agent_name(),
+                  reviewer_agent,
                   "reviewer",
                   selected_task->attempt_count,
                   "running",
@@ -2095,16 +2098,16 @@ int cmd_start(
                   selected_task->id,
                   reviewer_run_id,
                   "review.started",
-                  reviewer_logical_agent_name(),
+                  reviewer_agent,
                   {
                       EventPayloadField{"coder_run_id", json_string(run_id)},
                       EventPayloadField{"review_cycle", std::to_string(review_cycle)},
-                      EventPayloadField{"agent", json_string(reviewer_logical_agent_name())},
+                      EventPayloadField{"agent", json_string(reviewer_agent)},
                   },
               });
           reviewer_started_clock = std::chrono::steady_clock::now();
           reviewer_launch_result = run_agent_with_timeout(
-              "claude",
+              reviewer_agent_name,
               reviewer_prompt,
               selected_path.path,
               reviewer_stdout_file,
@@ -2152,7 +2155,7 @@ int cmd_start(
                   project_name,
                   *selected_task,
                   selected_path,
-                  reviewer_logical_agent_name(),
+                  reviewer_agent,
                   "reviewer",
                   selected_task->attempt_count,
                   "finished",
@@ -2192,7 +2195,7 @@ int cmd_start(
                   selected_task->id,
                   reviewer_run_id,
                   "review.blocked",
-                  reviewer_logical_agent_name(),
+                  reviewer_agent,
                   {
                       EventPayloadField{"task_id", json_string(selected_task->id)},
                       EventPayloadField{"reviewer_run_id", json_string(reviewer_run_id)},
@@ -2296,7 +2299,7 @@ int cmd_start(
                       selected_task->id,
                       reviewer_run_id,
                       "review.approved",
-                      reviewer_logical_agent_name(),
+                      reviewer_agent,
                       {
                           EventPayloadField{"task_id", json_string(selected_task->id)},
                           EventPayloadField{"reviewer_run_id", json_string(reviewer_run_id)},
@@ -2341,7 +2344,7 @@ int cmd_start(
                         selected_task->id,
                         reviewer_run_id,
                         "task.review_cycle_exceeded",
-                        reviewer_logical_agent_name(),
+                        reviewer_agent,
                         {
                             EventPayloadField{"task_id", json_string(selected_task->id)},
                             EventPayloadField{"reviewer_run_id", json_string(reviewer_run_id)},
@@ -2372,7 +2375,7 @@ int cmd_start(
                         selected_task->id,
                         reviewer_run_id,
                         "review.rework_requested",
-                        reviewer_logical_agent_name(),
+                        reviewer_agent,
                         {
                             EventPayloadField{"task_id", json_string(selected_task->id)},
                             EventPayloadField{"reviewer_run_id", json_string(reviewer_run_id)},
@@ -2412,7 +2415,7 @@ int cmd_start(
                       selected_task->id,
                       reviewer_run_id,
                       "review.blocked",
-                      reviewer_logical_agent_name(),
+                      reviewer_agent,
                       {
                           EventPayloadField{"task_id", json_string(selected_task->id)},
                           EventPayloadField{"reviewer_run_id", json_string(reviewer_run_id)},
@@ -2452,7 +2455,7 @@ int cmd_start(
                     selected_task->id,
                     reviewer_run_id,
                     "review.blocked",
-                    reviewer_logical_agent_name(),
+                    reviewer_agent,
                     {
                         EventPayloadField{"task_id", json_string(selected_task->id)},
                         EventPayloadField{"reviewer_run_id", json_string(reviewer_run_id)},
@@ -2489,7 +2492,7 @@ int cmd_start(
                     selected_task->id,
                     reviewer_run_id,
                     "review.blocked",
-                    reviewer_logical_agent_name(),
+                    reviewer_agent,
                     {
                         EventPayloadField{"task_id", json_string(selected_task->id)},
                         EventPayloadField{"reviewer_run_id", json_string(reviewer_run_id)},
@@ -2529,7 +2532,7 @@ int cmd_start(
                   project_name,
                   *selected_task,
                   selected_path,
-                  reviewer_logical_agent_name(),
+                  reviewer_agent,
                   "reviewer",
                   selected_task->attempt_count,
                   "finished",
@@ -2547,14 +2550,14 @@ int cmd_start(
               project_name,
               selected_task->id,
               reviewer_run_id,
-              "agent." + reviewer_logical_agent_name(),
+              "agent." + reviewer_agent,
               "stdout",
               reviewer_stdout_file);
           event_log.append_stream_file(
               project_name,
               selected_task->id,
               reviewer_run_id,
-              "agent." + reviewer_logical_agent_name(),
+              "agent." + reviewer_agent,
               "stderr",
               reviewer_stderr_file);
           event_log.append(
@@ -2567,7 +2570,7 @@ int cmd_start(
                   {
                       EventPayloadField{
                           "agent",
-                          json_string(reviewer_logical_agent_name()),
+                          json_string(reviewer_agent),
                       },
                       EventPayloadField{"role", json_string("reviewer")},
                       EventPayloadField{

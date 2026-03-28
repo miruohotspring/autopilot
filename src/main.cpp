@@ -22,7 +22,7 @@ void print_usage(const char* prog) {
   std::cerr << "       " << prog << " add <path> [-n <name>] [-p <project_name>]\n";
   std::cerr << "       " << prog << " task add <title> [-p <project_name>]\n";
   std::cerr << "       " << prog << " rm [-p <project_name>]\n";
-  std::cerr << "       " << prog << " start [project_name] [--review] [--no-review] [--timeout <seconds>]\n";
+  std::cerr << "       " << prog << " start [project_name] [--review] [--no-review] [--reviewer-agent <agent>] [--timeout <seconds>]\n";
   std::cerr << "       " << prog << " briefing\n";
   std::cerr << "       " << prog << " kill\n";
   std::cerr << "       " << prog << " update\n";
@@ -145,6 +145,7 @@ int main(int argc, char** argv) {
   if (cmd == "start") {
     std::optional<std::string> maybe_project;
     std::optional<int> maybe_timeout;
+    std::optional<std::string> maybe_reviewer_agent;
     bool requested_review = false;
     bool requested_no_review = false;
     int i = 2;
@@ -157,6 +158,9 @@ int main(int argc, char** argv) {
           print_usage(argv[0]);
           return 1;
         }
+        i += 2;
+      } else if (arg == "--reviewer-agent" && i + 1 < argc) {
+        maybe_reviewer_agent = argv[i + 1];
         i += 2;
       } else if (arg == "--review") {
         requested_review = true;
@@ -178,7 +182,7 @@ int main(int argc, char** argv) {
     } else if (requested_no_review) {
       maybe_review_enabled = false;
     }
-    return cmd_start(maybe_project, maybe_timeout, maybe_review_enabled);
+    return cmd_start(maybe_project, maybe_timeout, maybe_review_enabled, maybe_reviewer_agent);
   }
 
   if (cmd == "briefing") {

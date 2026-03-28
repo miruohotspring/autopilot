@@ -556,6 +556,46 @@ review_blocked_alert="$(find "$home2/.autopilot/projects/ReviewBlockedProject/ru
 assert_exists "$review_blocked_alert"
 assert_file_contains "$review_blocked_alert" "\"type\": \"reviewer_blocked\""
 
+echo "[test] --reviewer-agent uses separate agent for reviewer"
+split_agent_repo="$TMP_DIR/repo-split-agent"
+mkdir -p "$split_agent_repo"
+new_project "SplitAgentProject" "splitag" "$split_agent_repo"
+add_task "SplitAgentProject" "split agent task"
+stdout_split_agent="$TMP_DIR/start_stdout_split_agent.txt"
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" FAKE_AGENT_STDOUT="coder done" \
+  FAKE_AGENT_REVIEWER_NAME="codex" \
+  FAKE_AGENT_REVIEWER_STDOUT='{"verdict":"approve","summary":"ok"}' \
+  "$AP_BIN" start SplitAgentProject --review --reviewer-agent codex >"$stdout_split_agent"
+split_agent_runs_dir="$home2/.autopilot/projects/SplitAgentProject/runtime/runs"
+split_agent_runs=( "$split_agent_runs_dir"/* )
+assert_file_contains "$stdout_split_agent" "completed task: split agent task"
+assert_file_contains "${split_agent_runs[0]}/meta.json" "\"agent\": \"coder.claude\""
+assert_file_contains "${split_agent_runs[1]}/meta.json" "\"agent\": \"reviewer.codex\""
+
+echo "[test] config.toml reviewer_agent is respected"
+reviewer_config_repo="$TMP_DIR/repo-reviewer-config"
+mkdir -p "$reviewer_config_repo"
+new_project "ReviewerConfigProject" "rvcfg" "$reviewer_config_repo"
+add_task "ReviewerConfigProject" "config reviewer task"
+cat >"$home2/.autopilot/config.toml" <<'TOML'
+[start]
+agent = "claude"
+reviewer_agent = "codex"
+TOML
+stdout_rv_config="$TMP_DIR/start_stdout_rv_config.txt"
+env -u TMUX AUTOPILOT_START_DISABLE_TMUX=1 HOME="$home2" PATH="$fake_bin:$PATH" \
+  FAKE_AGENT_NAME="claude" FAKE_AGENT_STDOUT="coder done" \
+  FAKE_AGENT_REVIEWER_NAME="codex" \
+  FAKE_AGENT_REVIEWER_STDOUT='{"verdict":"approve","summary":"ok"}' \
+  "$AP_BIN" start ReviewerConfigProject --review >"$stdout_rv_config"
+rv_config_runs_dir="$home2/.autopilot/projects/ReviewerConfigProject/runtime/runs"
+rv_config_runs=( "$rv_config_runs_dir"/* )
+assert_file_contains "$stdout_rv_config" "completed task: config reviewer task"
+assert_file_contains "${rv_config_runs[0]}/meta.json" "\"agent\": \"coder.claude\""
+assert_file_contains "${rv_config_runs[1]}/meta.json" "\"agent\": \"reviewer.codex\""
+rm -f "$home2/.autopilot/config.toml"
+
 # --- Phase 5 tests ---
 
 echo "[test] run_counter increments and run_id uses counter format"

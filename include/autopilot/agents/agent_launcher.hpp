@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
 #include <string>
 
 struct AgentLaunchResult {
@@ -9,6 +10,9 @@ struct AgentLaunchResult {
 };
 
 std::string resolve_agent_name();
+std::string resolve_reviewer_agent_name(
+    const std::optional<std::string>& cli_override,
+    const std::string& coder_agent_name);
 std::string build_agent_shell_command(const std::string& agent_name, const std::string& prompt);
 
 AgentLaunchResult run_agent(
